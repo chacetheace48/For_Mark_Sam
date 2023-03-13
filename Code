@@ -1,0 +1,4350 @@
+
+### Clear Environment
+rm(list = ls())
+
+
+### Load Packages
+library(tidyverse)
+library(lubridate)
+library(ggridges)
+library(ggrepel)
+library(caret)
+library(caTools)
+library(mgcv)
+library(randomForest)
+library(neuralnet)
+library(xgboost)
+library(readr)
+library(stringr)
+library(car)
+library(e1071)                      
+
+
+### Get data up to this season
+Full_Data_Updated <- read.csv("C:/Users/Chace/Desktop/Elite Prospects Scraping Code/Final Work/query_results.csv")
+
+## Get this season
+This_Season <- read.csv("C:/Users/Chace/Desktop/Elite Prospects Scraping Code/Master Team Scraper Data/Data 2022-23.csv")
+
+
+glimpse(Full_Data_Updated)
+
+### Filter out this season so i can be using the most up to date data for 2023
+Full_Data_Updated <- Full_Data_Updated %>%
+  filter(data.season.endYear != 2023)
+
+Full_Data_Updated <- rbind(Full_Data_Updated,This_Season)
+
+### Remove data as its being made obsolete so that my computer doesn't crash
+rm(This_Season)
+
+### Get only Distinct Seasons
+Drop_Duplicates <- Full_Data_Updated %>%
+  distinct() %>%
+  mutate(Season = 1)
+
+## Remove the Fulle data
+rm(Full_Data_Updated)
+
+### Change the NA's to zeros for the various statistics
+Drop_Duplicates$data.regularStats.GP[is.na(Drop_Duplicates$data.regularStats.GP)] <- 0
+Drop_Duplicates$data.regularStats.G[is.na(Drop_Duplicates$data.regularStats.G)] <- 0
+Drop_Duplicates$data.regularStats.A[is.na(Drop_Duplicates$data.regularStats.A)] <- 0
+Drop_Duplicates$data.regularStats.PTS[is.na(Drop_Duplicates$data.regularStats.PTS)] <- 0
+Drop_Duplicates$data.regularStats.PIM[is.na(Drop_Duplicates$data.regularStats.PIM)] <- 0
+Drop_Duplicates$data.postseasonStats.GP[is.na(Drop_Duplicates$data.postseasonStats.GP)] <- 0
+Drop_Duplicates$data.postseasonStats.G[is.na(Drop_Duplicates$data.postseasonStats.G)] <- 0
+Drop_Duplicates$data.postseasonStats.A[is.na(Drop_Duplicates$data.postseasonStats.A)] <- 0
+Drop_Duplicates$data.postseasonStats.PTS[is.na(Drop_Duplicates$data.postseasonStats.PTS)] <- 0
+Drop_Duplicates$data.postseasonStats.PIM[is.na(Drop_Duplicates$data.postseasonStats.PIM)] <- 0
+
+
+
+Drop_Duplicates <- Drop_Duplicates %>%
+  ### Get Rid of the random leagues that break the NHLe conversions
+  filter(data.league.name != "M-Cup") %>%
+  filter(data.league.name != "Swiss Cup") %>%
+  filter(data.league.name != "Champions HL") %>%
+  filter(data.league.name != "ET") %>%
+  filter(data.league.name != "WJC-20 D1") %>%
+  ### BICHL is bugged or fake or something. Just leave it out for now
+  filter(data.league.name != "BICHL")
+
+
+### To Find SPecific Teams
+Find_Team <- Drop_Duplicates %>%
+  filter(data.teamName == "HK Sochi") %>%
+  filter(data.season.endYear == "2023") %>%
+  filter(data.regularStats.GP > 4) %>%
+  filter(data.league.name != "M-Cup") %>%
+  filter(data.league.name != "Swiss Cup") %>%
+  filter(data.league.name != "Champions HL") %>%
+  filter(data.league.name != "ET")
+
+
+glimpse(Find_Team)
+
+get_unique_ids <- Drop_Duplicates %>%
+  select(data.player.id) %>%
+  distinct()
+
+
+
+
+### Graph the Team Above and how their team scores
+Team_Graph <- ggplot(Find_Team) +
+  geom_bar( aes(y= reorder(data.player.name, data.regularStats.PPG)  , x=data.regularStats.PPG, fill = data.player.position), stat="identity", alpha=0.7) +
+  facet_wrap(~data.teamName) +
+  #### geom_errorbar( aes(x=Season, ymin=estimate-Two_STD, ymax=estimate+Two_STD), width=0.4, 
+  ### colour="orange", alpha=0.9, size=1.3) +
+  labs(x = "Points Per Game Played",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66. Project With @woumaxx and @Josh_Khalfin",
+       title = "Team Leaders in Points Per Game Played",
+       subtitle = "Minimum 5 Games Played With Team to Be Included. GP Above Bar") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))+
+  geom_text(data=Find_Team,aes(x=data.regularStats.PPG,y=data.player.name,label=data.regularStats.GP),vjust=0.2,hjust=-0.1)
+
+
+Team_Graph
+
+
+### Allow for playoff and regular season data combined
+For_Team_Context <- Drop_Duplicates %>%
+  mutate(Total_GP = data.regularStats.GP + data.postseasonStats.GP) %>%
+  mutate(Total_G = data.regularStats.G + data.postseasonStats.G) %>%
+  mutate(Total_A = data.regularStats.A + data.postseasonStats.A) %>%
+  mutate(Total_Points = data.regularStats.PTS + data.postseasonStats.PTS) %>%
+  mutate(Total_PPG = Total_Points / Total_GP)
+
+
+### Get the summary stats for each league
+League_Sum_Stats <- For_Team_Context %>%
+  group_by(data.season.endYear,data.league.name) %>%
+  ### Filter out seasons with imcompelte data
+  filter(data.season.endYear != 2001) %>%
+  filter(data.season.endYear != 2002) %>%
+  ### Filter Out Players with a really small sample for the mean and SD caclulations
+  ### This is probably far more helpful for the team level stuff but thats fine
+  filter(data.regularStats.GP > 4) %>%
+  ### This is with aggregate data. Not being used anymore
+  summarise(Goals_Mean = mean(Total_G),
+            Assists_Mean = mean(Total_A),
+            Assists_SD = sd(Total_A),
+            Goals_SD = sd(Total_G),
+            PPG_Mean = mean(Total_PPG),
+            PPG_SD = sd(Total_PPG))
+
+
+
+
+
+
+
+
+
+Find_Team <- For_Team_Context %>%
+  filter(data.teamName == "HK Sochi") %>%
+  filter(data.season.endYear == "2022") %>%
+  filter(data.regularStats.GP > 4) %>%
+  filter(data.league.name != "M-Cup") %>%
+  filter(data.league.name != "Swiss Cup") %>%
+  filter(data.league.name != "Champions HL") %>%
+  filter(data.league.name != "ET")
+
+
+ 
+
+
+### Get the summary statisics of each team for players who did at least 10 games that year
+By_Team_Season <- For_Team_Context %>%
+  filter(Total_GP > 4) %>%
+  group_by(data.league.name,data.teamName,data.season.endYear) %>%
+  summarise(Players = sum(Season),
+            PPG_Mean = mean(Total_PPG),
+            PPG_SD = sd(Total_PPG))
+  
+
+
+
+### Dont do this if you dont have to but this exports the data
+write.csv(For_Team_Context,
+          "C:\\Users\\Chace\\Desktop\\Elite Prospects Scraping Code\\Master Team Scraper Data\\Team_Info.csv", row.names = FALSE)
+
+
+
+
+### Start the Era Adjustment. Make a dataframe to get every single league so that
+### you can then make a loop that applies the era adjustment to all the leagues in the database
+All_Leages <- Drop_Duplicates %>%
+  group_by(data.league.name) %>%
+  summarise(Played = sum(Season))
+
+### Make a variable to give each league a new entry
+All_Leages$down_count <- nrow(All_Leages):1
+
+All_Leages <- All_Leages %>%
+  arrange(down_count)
+
+### Total # of leagues
+Max_I <- max(All_Leages$down_count)
+Max_I <- as.numeric(Max_I)
+
+
+i <- 1
+
+League_Name <- All_Leages %>%
+  filter(down_count == i)
+
+
+League_Name <- League_Name[1,1]
+
+### Get the league name as a string to streamline the process
+League_Name <- as.character(League_Name)
+
+
+
+### Start the Era Adjustment
+League_Filter <- Drop_Duplicates %>%
+  filter(data.league.name == League_Name)
+
+
+League_Average_GPG <- League_Filter 
+
+
+
+### The final Two Variables represent the goals and assists Era adjustment factors
+Total_Goals <- League_Filter %>%
+  group_by(data.season.endYear) %>%
+  filter(data.season.endYear != 2001) %>%
+  filter(data.season.endYear != 2002) %>%
+  summarise(Goals = sum(data.regularStats.G),
+            GP = sum(data.regularStats.GP),
+            Assists = sum(data.regularStats.A)) %>%
+  mutate(Goals_GP = Goals / GP) %>%
+  mutate(Assists_GP = Assists / GP) %>%
+  mutate(Normal_GP = GP / 36) %>%
+  mutate(Total_GGP = Goals / Normal_GP) %>%
+  mutate(Total_AGP = Assists / Normal_GP)
+
+
+
+
+
+
+
+Total_GP <- League_Filter %>%
+  summarise(Total__GP = sum(data.regularStats.GP))
+
+Total_G <- League_Filter %>%
+  summarise(Total__G = sum(data.regularStats.G))
+
+
+
+
+Total_GP <- Total_GP[1,1]
+
+Total_GP <- as.numeric(Total_GP)
+
+### For the era adjustment divide the total goals in the league by 36 to account for teams
+### having 18 skaters per side
+Total_GP <- Total_GP / 36
+
+
+
+Total_G <- League_Filter %>%
+  summarise(Total__G = sum(data.regularStats.G))
+
+Total_G <- Total_G[1,1]
+
+Total_G <- as.numeric(Total_G)
+
+### Replicate With Apploeos
+Total_A <- League_Filter %>%
+  summarise(Total__A = sum(data.regularStats.A))
+
+
+Total_A <- Total_A[1,1]
+
+Total_A <- as.numeric(Total_A)
+
+
+
+Average_Goals_GP <- Total_G / Total_GP
+
+Average_Assists_GP <- Total_A / Total_GP
+
+###  Add on goals and assists as the era adjustment
+Total_Goals <- Total_Goals %>%
+  mutate(Goal_Era_Adjustment = Average_Goals_GP / Total_GGP) %>%
+  mutate(Assist_Era_Adjustment = Average_Assists_GP / Total_AGP) %>%
+  mutate(League = League_Name)
+
+
+
+
+
+
+
+
+
+
+### Repeat the process in a loop to quickly apply it to all the leagues and seasons in the database
+i <- 2
+
+for (i in 2:Max_I) {
+  
+  
+  
+  
+  League_Name <- All_Leages %>%
+    filter(down_count == i)
+  
+  
+  League_Name <- League_Name[1,1]
+  
+  League_Name <- as.character(League_Name)
+  
+  
+  
+  ### Start the Era Adjustment
+  League_Filter <- Drop_Duplicates %>%
+    filter(data.league.name == League_Name)
+  
+  
+  League_Average_GPG <- League_Filter 
+  
+  
+  
+  ### The final Two Variables represent the goals and assists Era adjustment factors
+  Era_Adjustment <- League_Filter %>%
+    group_by(data.season.endYear) %>%
+    filter(data.season.endYear != 2001) %>%
+    filter(data.season.endYear != 2002) %>%
+    summarise(Goals = sum(data.regularStats.G),
+              GP = sum(data.regularStats.GP),
+              Assists = sum(data.regularStats.A)) %>%
+    mutate(Goals_GP = Goals / GP) %>%
+    mutate(Assists_GP = Assists / GP) %>%
+    mutate(Normal_GP = GP / 36) %>%
+    mutate(Total_GGP = Goals / Normal_GP) %>%
+    mutate(Total_AGP = Assists / Normal_GP)
+  
+  
+  
+  
+  
+  Total_GP <- League_Filter %>%
+    summarise(Total__GP = sum(data.regularStats.GP))
+  
+  Total_G <- League_Filter %>%
+    summarise(Total__G = sum(data.regularStats.G))
+  
+  
+  
+  
+  Total_GP <- Total_GP[1,1]
+  
+  Total_GP <- as.numeric(Total_GP)
+  
+  Total_GP <- Total_GP / 36
+  
+  
+  
+  Total_G <- League_Filter %>%
+    summarise(Total__G = sum(data.regularStats.G))
+  
+  Total_G <- Total_G[1,1]
+  
+  Total_G <- as.numeric(Total_G)
+  
+  ### Replicate With Apploeos
+  Total_A <- League_Filter %>%
+    summarise(Total__A = sum(data.regularStats.A))
+  
+  
+  Total_A <- Total_A[1,1]
+  
+  Total_A <- as.numeric(Total_A)
+  
+  
+  
+  Average_Goals_GP <- Total_G / Total_GP
+  
+  Average_Assists_GP <- Total_A / Total_GP
+  
+  
+  Era_Adjustment <- Era_Adjustment %>%
+    mutate(Goal_Era_Adjustment = Average_Goals_GP / Total_GGP) %>%
+    mutate(Assist_Era_Adjustment = Average_Assists_GP / Total_AGP) %>%
+    mutate(League = League_Name)
+  
+  
+  
+  
+  
+  
+  
+  
+  Total_Goals <- rbind(Total_Goals,Era_Adjustment)
+  
+  
+  i <- i + 1
+  print(i)
+  
+}
+
+
+
+
+### Add the data frame to the master data frame containing the league level statistics 
+Drop_Duplicates <- left_join(Drop_Duplicates,Total_Goals, by = c("data.season.endYear" = "data.season.endYear","data.league.name" ="League") )
+
+
+
+
+glimpse(Drop_Duplicates)
+
+
+Drop_Duplicates <- Drop_Duplicates %>%
+  mutate(Era_Adjusted_Goals = data.regularStats.G * Goal_Era_Adjustment) %>%
+  mutate(Era_Adjusted_Assists = data.regularStats.A * Assist_Era_Adjustment) %>%
+  mutate(Era_Adjusted_Points = Era_Adjusted_Goals + Era_Adjusted_Assists) %>%
+  mutate(Era_Adjusted_PPG = Era_Adjusted_Points / data.regularStats.GP)
+
+
+
+### Now Calculate the league wide mean and standard deviation for each position and team
+League_Sum_Stats <- Drop_Duplicates %>%
+  group_by(data.season.endYear,data.league.name,data.player.position) %>%
+  filter(data.season.endYear != 2001) %>%
+  filter(data.season.endYear != 2002) %>%
+  filter(data.regularStats.GP > 4) %>%
+  summarise(Goals_Mean = mean(Era_Adjusted_Goals),
+            Assists_Mean = mean(Era_Adjusted_Assists),
+            Assists_SD = sd(Era_Adjusted_Assists),
+            Goals_SD = sd(Era_Adjusted_Goals),
+            PPG_Mean = mean(Era_Adjusted_PPG),
+            PPG_SD = sd(Era_Adjusted_PPG))
+
+
+### I dont think there is enough data to do the team level calcualtions by positions, 
+## so they are grouped more generally by all players
+Team_Sum_stats <- Drop_Duplicates %>%
+  group_by(data.season.endYear,data.league.name,data.teamName) %>%
+  filter(data.season.endYear != 2001) %>%
+  filter(data.season.endYear != 2002) %>%
+  filter(data.regularStats.GP > 4) %>%
+  summarise(Goals_Mean_Team = mean(Era_Adjusted_Goals),
+            Assists_Mean_Team = mean(Era_Adjusted_Assists),
+            Assists_SD_Team = sd(Era_Adjusted_Assists),
+            Goals_SD_Team = sd(Era_Adjusted_Goals),
+            PPG_Mean_Team = mean(Era_Adjusted_PPG),
+            PPG_SD_Team = sd(Era_Adjusted_PPG))
+
+
+
+
+
+
+
+
+### Add the average team and league scores to the master player table
+Drop_Duplicates <- left_join(Drop_Duplicates,League_Sum_Stats, by = c("data.season.endYear" = "data.season.endYear","data.league.name" ="data.league.name", "data.player.position" = "data.player.position") )
+Drop_Duplicates <- left_join(Drop_Duplicates,Team_Sum_stats, by = c("data.season.endYear" = "data.season.endYear","data.league.name" ="data.league.name", "data.teamName" = "data.teamName") )
+
+
+### Get a Z score for how much a player is scoring relative to their team and league. Will 
+### test in models later
+Drop_Duplicates <- Drop_Duplicates %>%
+  mutate(PPG_Z_Score_League = (Era_Adjusted_PPG - PPG_Mean)/ PPG_SD) %>%
+  mutate(PPG_Z_Score_Team = (Era_Adjusted_PPG - PPG_Mean_Team)/ PPG_SD_Team)
+  
+
+
+## In case we need to find certain players. Check if its working properly etc.
+find_matthews <- Drop_Duplicates %>%
+  filter(data.player.name == "Auston Matthews")
+
+
+### Start Collecting NHL Outcomes. These will be the dependant variables in modelling
+Just_NHL2 <- Drop_Duplicates %>%
+  filter(data.league.name == "NHL")
+
+### Dataframe containing the draft year of each prospect in the database
+DY_df <- read.csv("C:/Users/Chace/Desktop/Elite Prospects Scraping Code/Master Team Scraper Data/Draft_Year_DF.csv")
+
+### Join the NHL level stats with DY info
+Just_NHL2_DY <- left_join(Just_NHL2, DY_df, by = c("data.player.id" = "Get_Player_ID_Bday2.data.player.id") )
+
+### Use the first 8 seasons after a player is drafted for their NHL outcome numbers
+Just_NHL2_DY <- Just_NHL2_DY %>%
+  mutate(Drafted_Difference = data.season.endYear - DY_list) %>%
+  ### Decision point on how many out of sample years to include
+  filter(Drafted_Difference < 9)
+
+
+
+### Sid McDavid Comp
+Comp <- Just_NHL2_DY %>%
+  filter(data.player.name == "Sidney Crosby" | data.player.name == "Connor McDavid")
+
+glimpse(Comp)
+
+
+ggplot(data=Comp, aes(x=Drafted_Difference, y=Era_Adjusted_PPG, color = data.player.name, group=data.player.name)) +
+  geom_line()+
+  geom_point(aes(size=data.regularStats.GP)) +
+  labs(x = "Years Since Draft",
+       y="Era Adjusted Points Per Game Played",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Era Adjusted Points Per Game Played Comparison",
+       subtitle = "Sidney Crosby Vs. Connor McDavid") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+
+
+
+
+
+
+
+### Get Players Summary statistics for their time in the NHL
+Get_Player_Outcomes <- Just_NHL2_DY %>%
+  group_by(data.player.id) %>%
+  summarise(Total_GP = sum(data.regularStats.GP),
+            Total_Goals = sum(data.regularStats.G),
+            Total_Assists = sum(data.regularStats.A),
+            Era_Adj_Goals = sum(Era_Adjusted_Goals),
+            Era_Adj_Assists = sum(Era_Adjusted_Assists)) %>%
+  mutate(Total_Points = Total_Goals + Total_Assists) %>%
+  mutate(Era_Adj_Points = Era_Adj_Goals + Era_Adj_Assists)
+
+
+### Get the player id, name and position to join to their NHL outcome stats
+Get_Namesdata <- Just_NHL2_DY %>%
+  select(data.player.id,data.player.name,data.player.position) %>%
+  distinct()
+
+
+### Join the datasets and collect more stats
+Get_Player_Outcomes2 <- left_join(Get_Player_Outcomes,Get_Namesdata, by = "data.player.id")
+Get_Player_Outcomes2 <- Get_Player_Outcomes2 %>%
+  mutate(Era_Adj_PPG = Era_Adj_Points / Total_GP)  %>%
+  mutate(Raw_PPG = (Total_Goals + Total_Assists)  / Total_GP)
+
+
+### Get the summary stats of NHL players based on their position
+Forward_Outcomes <- Get_Player_Outcomes2 %>%
+  filter(data.player.position == "F") %>%
+  filter(Total_GP > 81) %>%
+  filter(Era_Adj_PPG != "NA")
+
+
+
+
+### On Average Forwards Score 0.45 Era Adjusted PPG
+mean(Forward_Outcomes$Era_Adj_PPG)
+
+
+### How much players have scored by their percentile
+quantile(Forward_Outcomes$Era_Adj_PPG, probs = c(.15, .5, .85))
+
+
+
+
+### Now dot he same for defenders
+D_Outcomes <- Get_Player_Outcomes2 %>%
+  filter(data.player.position == "D") %>%
+  filter(Total_GP > 81) %>%
+  filter(Era_Adj_PPG != "NA")
+
+
+
+
+### On Average Forwards Score 0.45 Era Adjusted PPG
+mean(D_Outcomes$Era_Adj_PPG)
+
+
+
+quantile(D_Outcomes$Era_Adj_PPG, probs = c(.15, .5, .85))
+
+median_f_value <- quantile(Forward_Outcomes$Era_Adj_PPG, probs = .5)
+median_f_value <- as.numeric(median_f_value)
+
+### Right now this defines a "Star" forward as the 85th percentile, but the code will easily
+### allow for changes if needed in the future
+star_f_value <- quantile(Forward_Outcomes$Era_Adj_PPG, probs = .85)
+star_f_value <- as.numeric(star_f_value)
+
+
+
+### Calculate dummy variables for if players hit various NHL thresholds in their first 8 seaosns 
+### since being drafted
+Get_Player_Outcomes2 <- Get_Player_Outcomes2 %>%
+  mutate(Played_Once = case_when(Total_GP > 0 ~ 1,
+                                 Total_GP <= 0 ~ 0)) %>%
+  mutate(GP_82 = case_when(Total_GP > 81 ~ 1,
+                           Total_GP <= 81 ~ 0)) %>%
+  mutate(GP_200 = case_when(Total_GP > 199 ~ 1,
+                            Total_GP <= 199 ~ 0)) %>%
+  mutate(PPG_Total = case_when(Era_Adj_PPG > 0.999 ~ 1,
+                               Era_Adj_PPG <= 0.999 ~ 0)) %>%
+  ### Forwards Star Cutoff
+  mutate(Total_Zero_Seven = case_when(Era_Adj_PPG > star_f_value ~ 1,
+                                      Era_Adj_PPG <= star_f_value ~ 0)) %>%
+  ### Forwards Average and Defenders Star Cutoff
+  mutate(Total_Zero_Four_Five = case_when(Era_Adj_PPG > 0.44999 ~ 1,
+                                     Era_Adj_PPG <= 0.44999 ~ 0)) %>%
+  ### Forwards Bottom 15% Cutofff
+  mutate(Total_Zero_Two_Two = case_when(Era_Adj_PPG > 0.21999 ~ 1,
+                                    Era_Adj_PPG <= 0.21999 ~ 0)) %>%
+  ### Defenders Bottom 15% Cutoff
+  mutate(Total_Zero_One_Six = case_when(Era_Adj_PPG > 0.15999 ~ 1,
+                                        Era_Adj_PPG <= 0.15999 ~ 0)) %>%
+  ### Above the median NHL forward
+  mutate(Median_F = case_when(Era_Adj_PPG > median_f_value ~ 1,
+                                        Era_Adj_PPG <= median_f_value ~ 0)) %>%
+  ### Above 85% of NHL forwardS
+  mutate(Star_F_Cutoff = case_when(Era_Adj_PPG > star_f_value ~ 1,
+                              Era_Adj_PPG <= star_f_value ~ 0))
+  
+
+
+
+
+### Get player birthdays
+Get_Player_ID_Bday <- Drop_Duplicates %>%
+  select(data.player.id,data.player.dateOfBirth)
+
+
+### Clean up the birthdays, filtering out players with missing infromation like what day or month
+### they were born on
+Get_Player_ID_Bday2 <- Get_Player_ID_Bday %>%
+  distinct() %>%
+  filter(data.player.dateOfBirth != "NA") %>%
+  mutate(Month_Date = str_sub(data.player.dateOfBirth,6,10)  ) %>%
+  filter(Month_Date != "00-00") %>%
+  mutate(Day = str_sub(data.player.dateOfBirth,9,10)  ) %>%
+  filter(Day != "00")
+
+
+
+glimpse(Get_Player_ID_Bday2)
+
+
+
+
+### Data Replicates Fine, need to be able get the players draft Year 
+#Make a function to get the 1st year of eligibility of every hockey player
+#### Only Load This Function to get the birthday stuff. If it has already been done ignore
+library(glue)
+
+
+### function to get the players draft year based on their birth date
+get_DY <- function(bd) {
+  
+  good_date <- tryCatch(
+    time_length(difftime(as.Date(glue("2023-09-15")), as.Date(bd)), "years"),
+    error=function(err) NA)
+  
+  if(is.na(good_date)){
+    return(NA)
+    break
+  } else {
+    
+    #Get the first draft_year of eligibility of hockey players
+    for (year in 1900:2030){
+      age = time_length(difftime(as.Date(glue("{year}-09-15")), as.Date(bd)), "years")
+      if (age < 17.99863){
+        next
+      } else if(age >= 17.99863) {
+        return(year)
+        break
+      }
+    }
+  }
+}
+#Test on me
+get_DY("1998-12-10")
+
+
+
+#Dataframe with players' DY
+DY_list <- c()
+for (year in Get_Player_ID_Bday2$data.player.dateOfBirth){
+  print(year)
+  DY_list <-  append(DY_list, get_DY(year))
+} 
+
+
+DY_df <- data.frame(Get_Player_ID_Bday2$data.player.id, DY_list)
+
+
+### Remember to Change the information
+write.csv(DY_df,
+          "C:\\Users\\Chace\\Desktop\\Elite Prospects Scraping Code\\Master Team Scraper Data\\Draft_Year_DF.csv", row.names = FALSE)
+
+DY_df <- read.csv("C:/Users/Chace/Desktop/Elite Prospects Scraping Code/Master Team Scraper Data/Draft_Year_DF.csv")
+
+
+With_Birthdays <- left_join(Drop_Duplicates, DY_df, by = c("data.player.id" = "Get_Player_ID_Bday2.data.player.id") )
+
+
+
+
+
+
+### Get NHL Outcomes
+With_NHL_Outcomes <- left_join(With_Birthdays,Get_Player_Outcomes2, by = "data.player.id")
+
+
+rm(DY_df)
+rm(With_Birthdays)
+
+### Get NHLe Data Frame
+NHLe.Translation.Factors <- read.csv("C:/Users/Chace/Desktop/Elite Prospects Scraping Code/NHLe Translation Factors.csv")
+
+
+
+
+With_NHLe_Data <- left_join(With_NHL_Outcomes,NHLe.Translation.Factors, by = c("data.league.name" = "League"))
+rm(With_NHL_Outcomes)
+
+
+glimpse(By_Team_Season)
+### Add Team Level Context to the NHLe Dataframe
+With_NHLe_Data <- left_join(With_NHLe_Data,By_Team_Season, by = c("data.league.name" = "data.league.name", "data.teamName" = "data.teamName", "data.season.endYear" = "data.season.endYear"))
+
+
+
+glimpse(With_NHLe_Data)
+
+
+### Now that you have all the seasons we can group by the Player ID and Get their NHLe From Each Season
+
+
+glimpse(With_NHLe_Data)
+
+## Replace NAs With 0s 
+With_NHLe_Data$GP_82[is.na(With_NHLe_Data$GP_82)] <- 0
+With_NHLe_Data$GP_200[is.na(With_NHLe_Data$GP_200)] <- 0
+With_NHLe_Data$Total_Zero_Seven[is.na(With_NHLe_Data$Total_Zero_Seven)] <- 0
+With_NHLe_Data$Total_Zero_Four_Five[is.na(With_NHLe_Data$Total_Zero_Four_Five)] <- 0
+With_NHLe_Data$Total_Zero_Two_Two[is.na(With_NHLe_Data$Total_Zero_Two_Two)] <- 0
+With_NHLe_Data$Total_Zero_One_Six[is.na(With_NHLe_Data$Total_Zero_One_Six)] <- 0
+
+### Dont Replace Plus Minus 
+With_NHLe_Data$data.regularStats.GP[is.na(With_NHLe_Data$data.regularStats.GP)] <- 0
+With_NHLe_Data$data.regularStats.G[is.na(With_NHLe_Data$data.regularStats.G)] <- 0
+With_NHLe_Data$data.regularStats.A[is.na(With_NHLe_Data$data.regularStats.A)] <- 0
+With_NHLe_Data$data.regularStats.PTS[is.na(With_NHLe_Data$data.regularStats.PTS)] <- 0
+With_NHLe_Data$data.regularStats.PIM[is.na(With_NHLe_Data$data.regularStats.PIM)] <- 0
+With_NHLe_Data$data.postseasonStats.GP[is.na(With_NHLe_Data$data.postseasonStats.GP)] <- 0
+With_NHLe_Data$data.postseasonStats.G[is.na(With_NHLe_Data$data.postseasonStats.G)] <- 0
+With_NHLe_Data$data.postseasonStats.A[is.na(With_NHLe_Data$data.postseasonStats.A)] <- 0
+With_NHLe_Data$data.postseasonStats.PTS[is.na(With_NHLe_Data$data.postseasonStats.PTS)] <- 0
+With_NHLe_Data$data.postseasonStats.PIM[is.na(With_NHLe_Data$data.postseasonStats.PIM)] <- 0
+
+glimpse(With_NHLe_Data)
+
+
+
+### Ensure NAs are gone
+mean(With_NHLe_Data$data.postseasonStats.PTS)
+mean(With_NHLe_Data$data.regularStats.PTS)
+
+### Convert Player scoring statistics to NHLe estimates using Max's old 
+### translation factors for now
+With_NHLe_Data <- With_NHLe_Data %>%
+  mutate(Goals_NHLe_R = Max_If_Miss*  (data.regularStats.G*Goal_Era_Adjustment)  ) %>%
+  mutate(Assist_NHLe_R = Max_If_Miss* (data.regularStats.A*Assist_Era_Adjustment)  ) %>%
+  mutate(Goals_NHLe_P = Max_If_Miss * (data.postseasonStats.G*Goal_Era_Adjustment)   ) %>%
+  mutate(Assists_NHLe_P = Max_If_Miss * (data.postseasonStats.A*Assist_Era_Adjustment)  )
+
+
+### Team Goal Seasons
+Team_Level_Data <- With_NHLe_Data %>%
+  group_by(data.teamName,data.season.endYear) %>%
+  summarise(Team_GF = sum(data.regularStats.G) + sum(data.postseasonStats.G),
+            Team_GP = sum(data.regularStats.GP) + sum(data.postseasonStats.GP) )
+
+
+
+gc()
+
+
+glimpse(With_NHLe_Data)
+
+## Will fail is fine
+For_NHL_Stats <- With_NHLe_Data %>%
+  group_by(data.player.id,data.season.endYear,data.player.name) %>%
+  summarise(
+    GP = data.regularStats.GP + data.postseasonStats.GP,
+    Weighted_Mean_PPG = ((PPG_Mean * data.regularStats.GP) + (PPG_Mean * data.postseasonStats.GP)) ,
+    Weighted_Mean_SD = ((PPG_SD * data.regularStats.GP) + (PPG_SD * data.postseasonStats.GP)) ,
+    
+    
+  )
+
+### Will fail is finen
+For_NHL_Stats2 <- For_NHL_Stats %>%
+  group_by(data.player.id,data.season.endYear,data.player.name) %>%
+  summarise(
+    Total_PPG = (sum(Weighted_Mean_PPG)),
+    Total_SD = (sum(Weighted_Mean_SD))
+  )
+
+glimpse()
+
+### Manually check the data again
+Sid <- With_NHLe_Data %>%
+  filter(data.player.name.x == "Auston Matthews")
+
+glimpse(With_NHLe_Data)
+
+
+rm(For_Team_Context,Get_Player_ID_Bday)
+
+
+
+### Condense the Players Statisitcs into 1 
+Yearly_Statistics <- With_NHLe_Data %>%
+  group_by(data.player.id,data.season.endYear,data.player.name.x) %>%
+  summarise(Season_Start = min(data.season.startYear),
+            Season_End = min(data.season.endYear),
+            Draft_Year = mean(DY_list),
+            Games_Played_R = sum(data.regularStats.GP),
+            Goals_R = sum(data.regularStats.G),
+            Assists_R = sum(data.regularStats.A),
+            PIMs_R = sum(data.regularStats.PIM),
+            PM_R = sum(data.regularStats.PM),
+            Goal_NHLe_R = sum(Goals_NHLe_R),
+            Assist_NHLe_R = sum(Assist_NHLe_R),
+            Games_Played_P = sum(data.postseasonStats.GP),
+            Goals_P = sum(data.postseasonStats.G),
+            Assists_P = sum(data.postseasonStats.A),
+            PIMs_P = sum(data.postseasonStats.PIM),
+            PM_P = sum(data.postseasonStats.PM),
+            Goal_NHLe_P = sum(Goals_NHLe_P),
+            Assists_NHLe_P = sum(Assists_NHLe_P),
+            Career_Points = sum(Era_Adj_Points),
+            Career_GP = mean(Total_GP),
+            Career_Points = mean(Total_Points),
+            Career_Era_ADJ_PPG = mean(Era_Adj_Points),
+            Career_PPG_EADJ = mean(Era_Adj_PPG),
+            Played_82 = mean(GP_82),
+            Played_200 = mean(GP_200),
+            Total_Zero_Seven = mean(Total_Zero_Seven),
+            Total_Zero_Four_Five = mean(Total_Zero_Four_Five),
+            Total_Zero_Two_Two = mean(Total_Zero_Two_Two),
+            Total_Zero_One_Six = mean(Total_Zero_One_Six),
+            Total_Assist_NHLe_GP = ((Assist_NHLe_R + Assists_NHLe_P) / (Games_Played_R + Games_Played_P)),
+            Total_Goal_NHLe_GP  = ((Goal_NHLe_R + Goal_NHLe_P) / (Games_Played_R + Games_Played_P)),
+            Total_PIMs_NHL= ((PIMs_R + PIMs_P) / (Games_Played_R + Games_Played_P)),
+            Total_PM_GP = ((PM_R + PM_P) / (Games_Played_R + Games_Played_P)),
+            Total_GP = ((Games_Played_R + Games_Played_P)),
+            Total_NHLe_GP = Total_Goal_NHLe_GP + Total_Assist_NHLe_GP,
+            Weighted_Z_Score = weighted.mean(PPG_Z_Score_League, (data.regularStats.GP+data.postseasonStats.GP) ),
+            Weighted_Z_Score_Team = weighted.mean(PPG_Z_Score_Team, (data.regularStats.GP+data.postseasonStats.GP) ),
+            Weighted_League_Difficulty = weighted.mean(Max_If_Miss, (data.regularStats.GP+data.postseasonStats.GP) ),
+            Leagues = paste0(unique(data.league.name ), collapse="/"), #If player has played on multiple teams in the same league, it will put them in one cell
+            .groups="drop",) %>%
+  mutate(NHLe = Goal_NHLe_R + Assist_NHLe_R + Goal_NHLe_P + Assists_NHLe_P) %>%
+  mutate(NHLe_GP = NHLe / (Games_Played_R + Games_Played_P)) %>%
+  mutate(Years_Since_Draft = Season_End - Draft_Year) %>%
+  mutate(Played_WJC20 = str_detect(Leagues, "WJC-20")) %>%
+  mutate(Played_WJ = case_when(Played_WJC20 == TRUE ~ 1,
+                               Played_WJC20 == FALSE ~0))
+
+
+
+
+gc()
+
+## Drop Dups
+Yearly_Statistics <- Yearly_Statistics %>%
+  distinct()
+
+
+gc()
+
+### Just Look at this class for some graphs
+Just_2023_Class <- Yearly_Statistics %>%
+  filter(Draft_Year == 2023) %>%
+  filter(Season_Start == 2022)  %>%
+  arrange(desc(NHLe_GP))
+
+### Just show the top skaters in the graph
+for_graph <- Just_2023_Class %>%
+  filter(NHLe_GP > 0.15) %>%
+  filter(Games_Played_R > 4)
+
+glimpse(for_graph)
+### Graphs 
+
+NHLe_Class_Graph <- ggplot(for_graph) +
+  geom_bar( aes(y= reorder(data.player.name.x, NHLe_GP)  , x=NHLe_GP, fill = Games_Played_R), stat="identity", alpha=0.7) +
+  #### geom_errorbar( aes(x=Season, ymin=estimate-Two_STD, ymax=estimate+Two_STD), width=0.4, 
+  ### colour="orange", alpha=0.9, size=1.3) +
+  labs(x = "NHLe Per Game Played",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66, Project With @woumaxx and @Josh_Khalfin",
+       title = "Highest NHLe Per Game Played of the 2023 Class",
+       subtitle = "Minimum 5 Regular Season Games Played") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+NHLe_Class_Graph
+
+
+
+### Now show the top scorers in their draft year in the entire dataset
+Best_DY_Seasons <- Yearly_Statistics %>%
+  ### Filter to just get DY
+  filter(Years_Since_Draft == 0) %>%
+  filter(Games_Played_R > 9) %>%
+  arrange(desc(NHLe_GP))
+
+
+### Highlight the 2023 class atop the all time NHLe leaders
+for_graph <- Best_DY_Seasons %>%
+  filter(NHLe_GP > 0.3) %>%
+  mutate(Eligable_2023 = case_when(Draft_Year == 2023 ~ "Yes",
+                                   Draft_Year != 2023 ~ "No"))
+
+glimpse(for_graph)
+### Graphs 
+
+All_Time_NHLe <- ggplot(for_graph) +
+  geom_bar( aes(y= reorder(data.player.name.x, NHLe_GP)  , x=NHLe_GP, fill = Eligable_2023), stat="identity", alpha=0.7) +
+  labs(x = "NHLe Per Game Played",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Best Draft Year NHLe Per Game Played",
+       subtitle = "Data from 2004 - Present") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+All_Time_NHLe
+
+
+
+
+glimpse(With_NHLe_Data)
+
+### Go get birthday and position data to model that you lost when making the yearly stats DF
+Player_Positions <- With_NHLe_Data %>%
+  group_by(data.player.id) %>%
+  select(data.player.position.x) %>%
+  distinct()
+
+
+Get_Birthday <- With_NHLe_Data %>%
+  select(data.player.id, data.player.dateOfBirth ) %>%
+  distinct()
+
+
+rm(With_NHLe_Data)
+
+### Join them over
+With_Demographics <- left_join(Yearly_Statistics,Player_Positions, by = "data.player.id")
+
+
+With_Demographics2 <- left_join(With_Demographics, Get_Birthday, by = "data.player.id")
+
+
+date_2022 <- as.Date(paste("2022", "01", "01", sep="-"))
+
+
+glimpse(With_Demographics2)
+
+With_Demographics2 <- With_Demographics2 %>%
+  mutate(Draft_Year_Date = as.Date(paste(Draft_Year, "01", "01", sep="-"))) %>%
+  mutate(DOB_Date = as.Date(data.player.dateOfBirth)) %>%
+  mutate(Season_End_Date = as.Date(paste(Season_End, "01", "01", sep="-"))) %>%
+  mutate(Season_Age = round(as.numeric((Season_End_Date - DOB_Date) / 365.25), 2))
+
+### Compare Players Scoring Rates Over Time
+Fantilli_Michkov <- With_Demographics2 %>%
+  filter(data.player.name.x == "Matvei Michkov" | 
+           data.player.name.x == "Adam Fantilli")
+
+
+
+
+
+p<-ggplot(Fantilli_Michkov, aes(x=Season_End, y=NHLe_GP, group=data.player.name.x)) +
+  geom_line(aes(color=data.player.name.x))+
+  geom_point(aes(color=data.player.name.x,size=Games_Played_R)) +
+  labs(x = "Season",
+       y="NHLe Per Game Played",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66, Project With @woumaxx and @Josh_Khalfin",
+       title = "Michkov and Fantilli's NHLe Over Time",
+       subtitle = "Dot Size Increasing With Sample Size") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+p
+
+
+### Start Splitting the Data by Year
+Just_DY_Data <- With_Demographics2 %>%
+  filter(Years_Since_Draft == 0)
+
+glimpse(Just_DY_Data)
+
+
+
+
+### Get DY-1 Stats for modelling
+Just_DY_Min_Data <- With_Demographics2 %>%
+  filter(Years_Since_Draft == -1) %>%
+  select(data.player.id,Games_Played_R,Goals_R,Assists_R,PIMs_R,PM_R,Goal_NHLe_R,Assist_NHLe_R,
+         Games_Played_P,Goals_P,Assists_P,PIMs_P,PM_P,Goal_NHLe_P,Assists_NHLe_P,Leagues,NHLe,
+         NHLe_GP,Total_Goal_NHLe_GP,Total_Assist_NHLe_GP,Total_PIMs_NHL,Total_PM_GP,Total_GP,Played_WJ,Weighted_Z_Score,Weighted_Z_Score_Team,Weighted_League_Difficulty)
+
+
+
+
+#### Join the two
+Combined_Data <- left_join(Just_DY_Data,Just_DY_Min_Data, by = "data.player.id")
+
+glimpse(Combined_Data)
+
+
+### Give the data names that are less likely to confuse people
+Combined_Data <- Combined_Data %>%
+  mutate(DY_NHLe_G = Total_Goal_NHLe_GP.x) %>%
+  mutate(DY_NHLe_A = Total_Assist_NHLe_GP.x) %>%
+  mutate(DY_Min_NHLe_G = Total_Goal_NHLe_GP.y) %>%
+  mutate(DY_Min_NHLe_A = Total_Assist_NHLe_GP.y) %>%
+  mutate(DY_PIMs_G = Total_PIMs_NHL.x) %>%
+  mutate(DY_Min_PIMs_G = Total_PIMs_NHL.y) %>%
+  mutate(DY_PM_G = Total_PM_GP.x) %>%
+  mutate(DY_Min_PM_G = Total_PM_GP.y) %>%
+  mutate(Prev_NHLe_GP = NHLe_GP.y) %>%
+  mutate(Current_NHLe_GP = NHLe_GP.x) %>%
+  mutate(Current_League_Z = Weighted_Z_Score.x) %>%
+  mutate(Prev_League_Z = Weighted_Z_Score.y) %>%
+
+  mutate(Current_Team_Z = Weighted_Z_Score_Team.x) %>%
+  mutate(Prev_Team_Z = Weighted_Z_Score_Team.y) %>%
+  
+  mutate(Current_League_Diff = Weighted_League_Difficulty.x) %>%
+  mutate(Prev_League_Diff = Weighted_League_Difficulty.y) %>%
+  
+  
+  mutate(First_Letter_First_Name =  substr(data.player.name.x, 1, 1)  ) %>%
+  mutate(Last_Name = sub("^[^ ]* ", "", data.player.name.x)) %>%
+  ### Create a name for players calling Connor Bedard C.Bedard-23 in case it looks better in graphs
+  mutate(Draft_Year_Quick = substr(as.character(Draft_Year), nchar(as.character(Draft_Year)) - 1, nchar(as.character(Draft_Year)))  ) %>%
+  mutate(Start_Name = paste(First_Letter_First_Name, Last_Name, sep = ".")) %>%
+  mutate(Name = paste(Start_Name,Draft_Year_Quick, sep = "-"))
+
+
+glimpse(Combined_Data)
+
+
+Just_Forwards <- Combined_Data %>%
+  filter(data.player.position.x == "F")
+
+
+Just_Defenders <- Combined_Data %>%
+  filter(data.player.position.x == "D")
+
+glimpse(Just_Forwards)
+
+### Get only forwards with enough out of sample data to go in a training set for a model
+Forwards_Model <- Just_Forwards %>%
+  filter(Draft_Year > 2003 & Draft_Year < 2016) %>%
+  mutate(Made_NHL = Played_82) %>%
+  mutate(Star_NHLer = Made_NHL * Total_Zero_Seven)
+
+D_Model <- Just_Defenders %>%
+  filter(Draft_Year > 2003 & Draft_Year < 2016) %>%
+  mutate(Made_NHL = Played_82) %>%
+  mutate(Star_NHLer = Made_NHL * Total_Zero_Four_Five)
+
+
+
+### Filter out NAs that mess with ML models
+Neural_Net_Data <- Forwards_Model %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(Current_League_Z != "NA") %>%
+  filter(Current_Team_Z != "NA") %>%
+  filter(Current_League_Diff != "NA") %>%
+  filter(Current_Team_Z != "NaN") %>%
+  filter(Total_GP.x != "NA") %>%
+  filter(Total_GP.y != "NA")
+  
+
+
+xgboost_data2 <- Just_Forwards %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(Current_League_Z != "NA") %>%
+  filter(Current_Team_Z != "NA") %>%
+  filter(Current_League_Diff != "NA") %>%
+  filter(Current_Team_Z != "NaN") %>%
+  filter(Total_GP.x != "NA") %>%
+  filter(Total_GP.y != "NA")
+  
+
+### Split Between Training and Test Set
+
+
+glimpse(Forwards_Model)
+
+
+(mean(Forwards_Model$Star_NHLer))*100
+
+
+glimpse(Forwards_Model)
+
+
+### Start Some baisc modelling
+ppg_model <- lm(Career_PPG_EADJ ~ DY_NHLe_G + DY_NHLe_A + Season_Age +Prev_NHLe_GP +
+                    Current_League_Z
+                  , 
+                  data = Forwards_Model)
+
+
+
+summary(ppg_model)
+
+
+
+
+
+
+
+
+
+### Now from a logisitc perspective
+star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +DY_Min_NHLe_A +
+                    DY_Min_NHLe_G
+                  , 
+                  data = Forwards_Model, family = binomial)
+
+summary(star_model)
+
+
+
+
+
+star_model2 <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +Prev_NHLe_GP,
+                  
+                  data = Forwards_Model, family = binomial)
+
+summary(star_model2)
+
+
+
+### Model for players missing DY-1 Data
+backup_star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age, 
+                         data = Forwards_Model, family = binomial)
+summary(backup_star_model)
+
+
+
+NHLer_Model <- glm(Made_NHL ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                     DY_Min_NHLe_A + DY_Min_NHLe_G, 
+                   data = Forwards_Model, family = binomial)
+summary(NHLer_Model)
+
+
+GAM_Model <- gam(Star_NHLer ~ s(Current_NHLe_GP) + s(Season_Age) 
+                 + s(Prev_NHLe_GP), data = Forwards_Model, family = binomial())
+
+summary(GAM_Model)
+
+
+RF_Model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                           DY_Min_NHLe_G + DY_Min_NHLe_A + Current_League_Z + Current_Team_Z +
+                          Current_League_Diff , data = Neural_Net_Data, ntree = 500)
+
+
+summary(RF_Model)
+
+
+importance(RF_Model)
+
+
+### Standardize all the stats and make a neural net model later
+
+### xGboost Model Code Goes Here
+
+### Try selecting only the variables needed for prediction
+### Takes only historical forwards with OS data
+For_Predictions <- Neural_Net_Data %>%
+  select(Star_NHLer,DY_NHLe_G,DY_NHLe_A,DY_Min_NHLe_G,DY_Min_NHLe_A,Weighted_Z_Score.x,Season_Age,
+         Weighted_League_Difficulty.x,Weighted_Z_Score_Team.x,Weighted_Z_Score.y,
+         Weighted_League_Difficulty.y,Total_GP.x,Total_GP.y)
+
+
+glimpse(xgboost_data2)
+
+### Takes all forwards including this years crop
+XG_OS_Data <- xgboost_data2 %>%
+  mutate(Made_NHL = Played_82) %>%
+  mutate(Star_NHLer = Made_NHL * Total_Zero_Seven) %>%
+  select(Star_NHLer,DY_NHLe_G,DY_NHLe_A,DY_Min_NHLe_G,DY_Min_NHLe_A,Weighted_Z_Score.x,Season_Age,
+         Weighted_League_Difficulty.x,Weighted_Z_Score_Team.x,Weighted_Z_Score.y,
+         Weighted_League_Difficulty.y,Total_GP.x,Total_GP.y)
+
+
+### Split to training and test set
+X_train = For_Predictions[,-1]                 
+y_train = For_Predictions[,1]        
+
+class(X_train)
+class(y_train)
+
+
+X_test = data.matrix(XG_OS_Data[,-1])                    # independent variables for test
+y_test = XG_OS_Data[,1]     
+
+
+X_train <- as.matrix(X_train)
+y_train <- as.matrix(y_train)
+
+X_test <- as.matrix(X_test)
+y_test <- as.matrix(y_test)
+
+# convert the train and test data into xgboost matrix type.
+xgboost_train = xgb.DMatrix(data=X_train, label=y_train)
+xgboost_test = xgb.DMatrix(data=X_test, label=y_test)
+
+
+
+### Try fitting an xgboost model. Optimize tuning pararmeters later
+xboost_model <- xgboost(data = xgboost_train,                    # the data   
+                #        gamma = gamma_best,
+                 #       subsample = sub_best, 
+                  #      max.depth = 6,           
+                   #     colsample_bytree = bytree_best,  
+                    #    min_child_weight = min_best,   
+                     #   max_delta_step = max_best,                            # max depth 
+                        nrounds=200,
+                        nthread = 4,
+                        objective = "binary:logistic")                              # max number of boosting iterations
+
+summary(xboost_model)
+
+
+
+
+
+
+importance_matrix <- xgb.importance(model = xboost_model)
+
+importance_matrix <- importance_matrix %>%
+  arrange(desc(Gain))
+
+print(importance_matrix)
+
+### Test the predicitons
+pred_test = predict(xboost_model, xgboost_test)
+pred_test <- as.data.frame(pred_test)
+
+
+
+xgpred <- cbind(xgboost_data2,pred_test)
+### Find the xgboosts model likely stars ever
+xgpred2 <- xgpred %>%
+  arrange(desc(pred_test))
+
+
+### Get Xgboost predictions onto the dataset with eveything else
+xg_preds <- xgpred2 %>%
+  select(data.player.id,pred_test)
+
+
+Just_Class <- xgpred2 %>%
+  filter(Draft_Year == 2023)
+
+
+least_likely_Stars <- xgpred2 %>%
+  filter(Played_82 == 1 & Total_Zero_Seven == 1)
+
+most_likely_misses <- xgpred2 %>%
+  filter(Played_82 == 0 | Total_Zero_Seven == 0) %>%
+  filter(Draft_Year < 2018)
+
+
+
+
+
+
+
+
+### Add the other model predictions to the dataset
+Just_Forwards$Star_Player_Odds <- predict(star_model, Just_Forwards, type = "response")  
+Just_Forwards$NHL_Player_Odds <- predict(NHLer_Model, Just_Forwards, type = "response") 
+Just_Forwards$GAM_Star_Player_Odds <- predict(GAM_Model, Just_Forwards, type = "response") 
+Just_Forwards$RF_Star_Player_Odds <- predict(GAM_Model, Just_Forwards, type = "response") 
+Just_Forwards$Est_PPG <- predict(ppg_model, Just_Forwards, type = "response") 
+
+
+
+
+### Add the xgboost model predictions as well
+Just_Forwards <- left_join(Just_Forwards,xg_preds, by = "data.player.id")
+
+
+### Random test out of curiosity
+ppg_model <- lm(Est_PPG ~ NHL_Player_Odds
+                , 
+                data = Just_Forwards)
+
+
+
+summary(ppg_model)
+
+
+
+
+write.csv(Just_Forwards,
+          "C:\\Users\\Chace\\Desktop\\Elite Prospects Scraping Code\\Master Team Scraper Data\\Prospect_Data_For_guys.csv", row.names = FALSE)
+
+
+
+
+
+### Sort the most likely stars over time
+Best_Ever <- Just_Forwards %>%
+  arrange(desc(Star_Player_Odds))
+
+
+
+gc()
+
+
+Find_2023_Class <- Just_Forwards %>%
+    filter(Draft_Year == 2023) %>%
+  arrange(desc(Star_Player_Odds))
+
+
+
+
+for_graph <- Find_2023_Class %>% 
+  filter(Star_Player_Odds > 0.05) 
+
+
+glimpse(for_graph)
+
+
+
+Class_Stars <- ggplot(for_graph) +
+  geom_bar( aes(y= reorder(data.player.name.x, Star_Player_Odds)  , x=Star_Player_Odds, fill = NHL_Player_Odds), stat="identity", alpha=0.7) +
+  facet_wrap(~Draft_Year) +
+  labs(x = "Star Player Probability",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Most Likely Star Forwards From The Draft Class",
+       subtitle = "DY Forwards Only. Draft Class On Label") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+Class_Stars
+
+
+
+
+
+
+
+
+
+
+### Best Ever
+for_graph <- Just_Forwards %>% 
+  filter(Star_Player_Odds > 0.9) 
+
+
+
+
+Most_Likely_Stars_Historically <- ggplot(for_graph) +
+  geom_bar( aes(y= reorder(data.player.name.x, Star_Player_Odds)  , x=Star_Player_Odds, fill = NHL_Player_Odds), stat="identity", alpha=0.7) +
+  #### geom_errorbar( aes(x=Season, ymin=estimate-Two_STD, ymax=estimate+Two_STD), width=0.4, 
+  ### colour="orange", alpha=0.9, size=1.3) +
+  labs(x = "Star Player Probability",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Most Likely Star Forwards From The Draft Class",
+       subtitle = "DY Forwards Only. Draft Class On Label") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+Most_Likely_Stars_Historically
+
+
+### Find Players That changed continents year over year
+glimpse(Just_Forwards)
+
+### This isn't done yet but something I want to test later
+For_League_Changes <- Just_Forwards %>%
+  mutate(Euro_DY_Min = str_detect(Leagues.y, "SHL") |
+           str_detect(Leagues.y, "Liiga") | str_detect(Leagues.y, "Russia") |
+           str_detect(Leagues.y, "KHL")  | 
+           str_detect(Leagues.y, "MHL") | str_detect(Leagues.y, "Czechia") | str_detect(Leagues.y, "Czechia")
+           ) %>%
+  mutate(NA_DY = str_detect(Leagues.x, "OHL") |
+           str_detect(Leagues.x, "AHL") | str_detect(Leagues.x, "QMJHL") |
+           str_detect(Leagues.x, "WHL")  | 
+           str_detect(Leagues.x, "USHL") | str_detect(Leagues.x, "USDP") ) %>%
+  mutate(Euro_DY = str_detect(Leagues.x, "SHL") |
+           str_detect(Leagues.x, "Liiga") | str_detect(Leagues.x, "Russia") |
+           str_detect(Leagues.x, "KHL")  | 
+           str_detect(Leagues.x, "MHL") | str_detect(Leagues.x, "Czechia") )
+  
+
+
+
+
+For_League_Changes$Euro_DY_Min <- as.numeric(For_League_Changes$Euro_DY_Min)
+For_League_Changes$NA_DY <- as.numeric(For_League_Changes$NA_DY)
+For_League_Changes$Euro_DY <- as.numeric(For_League_Changes$Euro_DY)
+
+
+For_League_Changes$Euro_DY_Min[is.na(For_League_Changes$Euro_DY_Min)] <- 0
+For_League_Changes$NA_DY[is.na(For_League_Changes$NA_DY)] <- 0
+For_League_Changes$Euro_DY[is.na(For_League_Changes$Euro_DY)] <- 0
+
+
+
+For_League_Changes <- For_League_Changes %>%
+  mutate(Changed_Continents = Euro_DY_Min * NA_DY) %>%
+  mutate(Changed_Continent = case_when(Euro_DY_Min == 1 & NA_DY == 1 ~ "Changed_Euro_To_NA",
+         Euro_DY_Min == 1 & Euro_DY == 1 ~ "Stayed in Europe Both Years",
+         Euro_DY_Min == 0 & Euro_DY == 0 ~ " Never In Europe",
+         Euro_DY_Min == 0 & Euro_DY == 1 ~ "Left For Europe")) %>%
+  filter(Changed_Continent != "NA")
+
+
+
+ggplot(For_League_Changes, aes(x=Prev_NHLe_GP, y=Current_NHLe_GP, fill = Changed_Continent,
+                               color = Changed_Continent)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x = "Previous NHLe GP",
+       y="Current NHLe GP",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "Is Falling Production Related to Changing COntinents",
+       subtitle = "Forwards Only") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Start the Cluster Analysis Too. Starting With the Forwards
+Forward_Cluster_Stats <- Just_Forwards %>%
+  select(DY_NHLe_G,DY_NHLe_A,Season_Age,
+         DY_Min_NHLe_G,DY_Min_NHLe_A,DY_PIMs_G)
+
+Forward_Cluster_Stats <- Forward_Cluster_Stats %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(DY_PIMs_G != "NA") 
+
+Just_Forwards_No_NA <- Just_Forwards %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(DY_PIMs_G != "NA") 
+
+
+
+Scaled_F_Stats <- scale(Forward_Cluster_Stats)
+Scaled_F_Stats <- as.data.frame(Scaled_F_Stats)
+
+### Use 150 clusters of prospects
+forward_type <- kmeans(Scaled_F_Stats, 150)
+
+
+
+
+
+### Get custering vector 
+forward_type <- forward_type$cluster
+
+
+forward_type2 <- cbind(Forward_Cluster_Stats,forward_type)
+
+glimpse(Just_Forwards_No_NA)
+
+
+Get_names <- Just_Forwards_No_NA %>%
+  select(data.player.name.x,data.player.id,Played_82,Played_200,Total_Zero_Seven,
+         Career_PPG_EADJ,Draft_Year)
+
+
+
+
+Combined_With_Names <- cbind(Get_names,forward_type2)
+
+Combined_With_Names <- Combined_With_Names %>%
+  arrange(desc(Career_PPG_EADJ)) %>%
+  arrange(desc(forward_type)) 
+
+
+find_cohort <- Combined_With_Names %>%
+  filter(forward_type == 57)
+
+
+
+glimpse(Combined_With_Names)
+### Show that varience doesnt really exist
+Combined_With_Names_Var <- Combined_With_Names %>%
+  filter(Draft_Year < 2017 & Draft_Year > 2003) %>%
+  mutate(Prospect = 1) %>%
+  mutate(Star = Total_Zero_Seven * Played_82)
+
+
+Varience_Test <- Combined_With_Names_Var %>%
+  group_by(forward_type) %>%
+  summarise(Skaters = sum(Prospect),
+            Stars = sum(Star),
+            NHLers = sum(Played_82) ) %>%
+  mutate(Busts = Skaters - NHLers) %>%
+  mutate(Star_Rate = (Stars / Skaters)*100 ) %>%
+  mutate(NHL_Rate = (NHLers / Skaters)*100  ) %>%
+  mutate(Bust_Rate = (Busts / Skaters)*100 ) %>%
+  filter(Skaters > 10)
+
+
+###G Graph the % of a cohort that became stars vs the percent that just made the NHL
+ggplot(Varience_Test, aes(x=Star_Rate, y=Bust_Rate,size = Skaters)) +
+  geom_point() +
+  geom_smooth(method = "losses") +
+  labs(x = "% Of Forwards Hitting 0.7 Era ADJ PPG",
+       y="% Of Forwards Failing to Reach 82 GP",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "Do High Risk / High Reward Prospects Exist?",
+       subtitle = "DY Forwards Only. Grouped into 150 Clusters") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Find a Name and Get Their Comparables 
+Name_Search_1 <- "Mitchell Marner"
+
+
+Find_Name_1 <- Combined_With_Names %>%
+  filter(data.player.name.x == Name_Search_1)
+
+Get_Column <- Find_Name_1 %>%
+  select(forward_type)
+
+Get_Column2 <- Get_Column[1, 1]
+
+Get_Column3 <- as.numeric(Get_Column2)
+
+
+Get_Only_Player_Comparables <- Combined_With_Names %>%
+  filter(forward_type == Get_Column3)
+
+
+
+for_density <- Get_Only_Player_Comparables %>%
+  mutate(Player_Name = Name_Search_1)
+
+
+
+### Find a Name and Get Their Comps too
+B_Name_Search_1 <- "Dylan Strome"
+
+
+B_Find_Name_1 <- Combined_With_Names %>%
+  filter(data.player.name.x == B_Name_Search_1)
+
+B_Get_Column <- B_Find_Name_1 %>%
+  select(forward_type)
+
+B_Get_Column2 <- B_Get_Column[1, 1]
+
+B_Get_Column3 <- as.numeric(B_Get_Column2)
+
+
+B_Get_Only_Player_Comparables <- Combined_With_Names %>%
+  filter(forward_type == B_Get_Column3)
+
+
+B_for_density <- B_Get_Only_Player_Comparables %>%
+  mutate(Player_Name = B_Name_Search_1)
+
+
+
+Comb_Density <- rbind(for_density,B_for_density)
+
+
+title_text <- paste0("", Name_Search_1, " Vs. ", B_Name_Search_1)
+title_text <- str_wrap(title_text, width = 60)
+
+
+glimpse(Comb_Density)
+
+### Graph the distribution of the cohorts output against eachother
+ggplot(Comb_Density, aes(x = Career_PPG_EADJ, y = Player_Name, fill = Player_Name)) +
+  geom_density_ridges(alpha=0.4) +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5)) +
+  labs(x = "Career PPG Of Player Comparables",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "Prospect Cohort Comparison - DY + 4 Season",
+       subtitle = title_text)
+
+
+
+
+glimpse(Just_Forwards_No_NA)
+
+
+### Now Make the Individualized Charts
+Get_NHLe <- Just_Forwards_No_NA %>%
+  select(data.player.name.x,data.player.id,NHLe_GP.x,Name)
+
+glimpse(Combined_With_Names)
+
+
+
+Combined_With_Names2 <- left_join(Combined_With_Names, Get_NHLe, by = "data.player.id")
+
+
+individual_name_search <- "Matvei Michkov"
+title <- "Player Comparables"
+
+
+
+combined_string <- paste(individual_name_search, title, sep = " ")
+
+
+Individual_Find_Name_1 <- Combined_With_Names %>%
+  filter(data.player.name.x == individual_name_search) 
+
+
+
+
+
+Individual_Get_Column <- Individual_Find_Name_1 %>%
+  select(forward_type)
+
+Individual_Get_Column2 <- Individual_Get_Column[1, 1]
+
+Individual_Get_Column3 <- as.numeric(Individual_Get_Column2)
+
+
+Individual_Get_Only_Player_Comparables <- Combined_With_Names2 %>%
+  filter(forward_type == Individual_Get_Column3)
+
+Individual_Get_Only_Player_Comparables <- Individual_Get_Only_Player_Comparables %>%
+  distinct()
+
+
+glimpse(Individual_Get_Only_Player_Comparables)
+
+Individual_Get_Only_Player_Comparables <- Individual_Get_Only_Player_Comparables %>%
+  mutate(Outcome = case_when(Career_PPG_EADJ > 0.7 & Played_82  == 1 ~ "High Producer",
+                             Career_PPG_EADJ < 0.7 & Career_PPG_EADJ > 0.45 & Played_82  == 1 ~ "Average Producer",
+                             Career_PPG_EADJ < 0.45 & Played_82  == 1 ~ "Low Production",
+                             Played_82  == 0 & Draft_Year < 2015 & Draft_Year > 2003 ~ "Bust",
+                             Career_PPG_EADJ == NA & Draft_Year > 2014 ~ "Waiting For Full Data",
+                             Draft_Year < 2004 ~ "Not in NHL Sample")) 
+
+
+
+
+Individual_Get_Only_Player_Comparables2 <- Individual_Get_Only_Player_Comparables %>%
+  filter(data.player.name.x.x == individual_name_search)
+
+
+Individual_Get_Only_Player_Comparables <- Individual_Get_Only_Player_Comparables %>%
+  mutate(Outcome = case_when(Outcome != "NA" ~ Outcome,
+                             Outcome == NA ~ "Too Early")) %>%
+  mutate(Outcome = as.factor(Outcome)) %>%
+  filter(Outcome == "High Producer" | Outcome == "Average Producer" | 
+           Outcome == "Low Production" | Outcome == "Bust")
+
+
+Individual_Get_Only_Player_Comparables_Graph <- 
+  rbind(Individual_Get_Only_Player_Comparables,Individual_Get_Only_Player_Comparables2)
+
+
+Individual_Get_Only_Player_Comparables_Graph <- Individual_Get_Only_Player_Comparables_Graph %>%
+  distinct() %>%
+  filter(data.player.name.x.x != "Matthew Bell") %>%
+  filter(data.player.name.x.x != "Jaime Laprise")
+
+
+
+glimpse(Individual_Get_Only_Player_Comparables_Graph)
+
+
+ggplot(Individual_Get_Only_Player_Comparables_Graph, aes(x=Season_Age, y=NHLe_GP.x,color=Outcome)) +
+  geom_point(cex=5, alpha = 0.8) +
+  geom_hline(yintercept = mean(Individual_Get_Only_Player_Comparables_Graph$NHLe_GP.x), color = "black", linetype = "dashed") +
+  geom_vline(xintercept =  mean(Individual_Get_Only_Player_Comparables_Graph$Season_Age), color = "black", linetype = "dashed") +
+  geom_text_repel(aes(label=data.player.name.x.x),
+                  force=1, point.padding=0.04,
+                  segment.size=0.1) +
+  scale_color_manual(values = c("Bust" = "#FF0000", "Low Production" = "coral", "Average Producer" = "cyan4", "High Producer" = "Blue", "NA" = "#A4A4A4")) +
+  scale_x_reverse() +
+  labs(x = "Year Age",
+       y="NHLe Per Game Played",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = combined_string,
+       subtitle = "DY Forwards Only.") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+
+### Start Getting Player Comparables Closest
+
+
+Forward_Comp_Stats <- Just_Forwards %>%
+  select(Total_GP.x,Total_GP.y,DY_NHLe_G,DY_NHLe_A,Season_Age,
+         DY_Min_NHLe_G,DY_Min_NHLe_A,DY_PIMs_G,Current_League_Z)
+
+
+
+
+Forward_Comp_Stats_Z <- scale(Forward_Comp_Stats)
+
+### Get custering vector 
+
+
+glimpse(Just_Forwards)
+
+
+Get_names_Fs <- Just_Forwards %>%
+  select(data.player.name.x,data.player.id,Played_82,Played_200,Total_Zero_Seven,
+         Career_PPG_EADJ,Draft_Year)
+
+
+
+
+For_F_Coms <- cbind(Get_names_Fs,Forward_Comp_Stats_Z)
+
+
+
+For_F_Coms_No_NA <- For_F_Coms %>%
+  filter(Total_GP.x != "NA") %>%
+  filter(Total_GP.y != "NA") %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(DY_PIMs_G != "NA") %>%
+  filter(Current_League_Z != "NA")
+  
+  
+### Select a player and find their closest comparable based on all these stats. 
+### Eventually weighing these stats will probably be smart but for now leave it
+Player_Name <- "Jason Robertson"
+
+
+Find_Player <- For_F_Coms_No_NA %>%
+  filter(data.player.name.x == Player_Name)
+
+Player_Scoring_DY <- Find_Player %>%
+  select(DY_NHLe_G)
+
+Player_Scoring_DY <- Player_Scoring_DY[1,1]
+
+Player_Scoring_DY_Min <- Find_Player %>%
+  select(DY_Min_NHLe_G)
+
+Player_Scoring_DY_Min <- Player_Scoring_DY_Min[1,1]
+
+
+Player_Assists_DY <- Find_Player %>%
+  select(DY_NHLe_A)
+
+Player_Assists_DY <- Player_Assists_DY[1,1]
+
+
+Player_Assists_DY_Min <- Find_Player %>%
+  select(DY_Min_NHLe_A)
+
+Player_Assists_DY_Min <- Player_Assists_DY_Min[1,1]
+
+
+
+
+Player_Age <- Find_Player %>%
+  select(Season_Age)
+
+Player_Age <- Player_Age[1,1]
+
+
+Player_Scoring_League <- Find_Player %>%
+  select(Current_League_Z)
+
+Player_Scoring_League <- Player_Scoring_League[1,1]
+
+Player_DY_GP <- Find_Player %>%
+  select(Total_GP.x)
+
+Player_DY_GP <- Player_DY_GP[1,1]
+
+
+
+
+Player_DY_Min_GP <- Find_Player %>%
+  select(Total_GP.y)
+
+Player_DY_Min_GP <- Player_DY_Min_GP[1,1]
+
+
+
+Player_DY_Pims <- Find_Player %>%
+  select(DY_PIMs_G)
+
+Player_DY_Pims <- Player_DY_Pims[1,1]
+
+
+
+Player_Comps <- For_F_Coms_No_NA %>%
+  mutate(Comarable_score =  abs(Player_Scoring_DY - DY_NHLe_G) + abs(Player_Scoring_DY_Min-DY_Min_NHLe_G)  +
+          abs(Player_Assists_DY - DY_NHLe_A) + abs(Player_Assists_DY_Min - DY_Min_NHLe_A)  +
+          abs(Player_Age - Season_Age)  + abs(Player_Scoring_League - Current_League_Z) +
+          abs(Player_DY_GP - Total_GP.x) + abs(Player_DY_Min_GP - Total_GP.y) +
+          abs(Player_DY_Pims - DY_PIMs_G)      ) %>%
+  ### Comp Score is being divided by 9 because in the O.G. code there was 9 metrics. 
+  ### So Update Accordingly
+  mutate(Comarable_score = Comarable_score / 9) %>%
+  arrange((Comarable_score)) %>%
+  mutate(Adjusted_Weight = 1/ Comarable_score)
+
+
+
+### Take Only the Top 35 Player Comparabels
+Top_Comps <- Player_Comps[1:36,]
+
+
+glimpse(Top_Comps)
+###
+Out_Sample_Comps <- Top_Comps %>%
+  filter(data.player.name.x != Player_Name) %>%
+  filter(Draft_Year < 2018) %>%
+  mutate(Star_Player = Total_Zero_Seven * Played_82)
+
+
+
+NHL_Rate <- mean(Out_Sample_Comps$Played_82)
+NHL_Rate <- NHL_Rate * 100
+
+
+NHL_Rate <- weighted.mean(Out_Sample_Comps$Played_82, Out_Sample_Comps$Adjusted_Weight)
+NHL_Rate <- NHL_Rate * 100
+
+
+
+
+
+NHL_Rate <- round(NHL_Rate, digits = 2)
+
+
+
+Star_Rate <- mean(Out_Sample_Comps$Star_Player)
+Star_Rate <- Star_Rate * 100
+
+
+Star_Rate <- weighted.mean(Out_Sample_Comps$Star_Player, Out_Sample_Comps$Adjusted_Weight)
+Star_Rate <- Star_Rate * 100
+
+
+
+Star_Rate <- round(Star_Rate, digits = 2)
+
+
+NHL_Sample <- Out_Sample_Comps %>%
+  filter(Career_PPG_EADJ != "NA")
+
+
+PPG_Rate <- mean(NHL_Sample$Career_PPG_EADJ)
+PPG_Rate <- weighted.mean(NHL_Sample$Career_PPG_EADJ, NHL_Sample$Adjusted_Weight)
+
+
+
+
+Top_Comps <- Top_Comps %>%
+  mutate(Outcome = case_when(data.player.name.x == Player_Name ~ "Prospect",
+                             Draft_Year & data.player.name.x != Player_Name & Draft_Year > 2017 ~ "Waiting For Full Data",
+                             Career_PPG_EADJ > 0.7 & Played_82  == 1 ~ "Star Production",
+                             Career_PPG_EADJ < 0.7 & Career_PPG_EADJ > 0.45 & Played_82  == 1 ~ "Top 6 Production",
+                             Career_PPG_EADJ < 0.45 & Career_PPG_EADJ > 0.15 & Played_82  == 1 ~ "Bottom 6 Production",
+                             Career_PPG_EADJ < 0.15 & Played_82  == 1 ~ "Replacement Level Production",
+                             Played_82  == 0 & Draft_Year < 2018 & Draft_Year > 2003 ~ "Bust",
+                             
+                             )) 
+
+
+Get_NHL_E_GP <- Just_Forwards %>%
+  select(data.player.id,NHLe_GP.x,Season_Age)
+
+
+Top_Comps <- left_join(Top_Comps,Get_NHL_E_GP, by = "data.player.id")
+
+title <- "Player Comparables"
+
+
+
+Title_String <- paste(Player_Name, title, sep = " ")
+
+
+
+
+String_1 <- "NHL Player Rate:"
+String2 <- paste(NHL_Rate,"%", sep = "")
+
+combined_string <- paste(String_1, String2, sep = " ")
+
+
+String_3 <- "Star Producer Rate:"
+String4 <- paste(Star_Rate,"%", sep = "")
+
+combined_string2 <- paste(String_3, String4, sep = " ")
+
+
+Combined_String3 <- paste(combined_string, combined_string2, sep = ". ")
+
+
+glimpse(Top_Comps)
+
+
+Top_Comps <- Top_Comps %>%
+  mutate(Adjusted_Weight = case_when(Adjusted_Weight == Inf ~ 1,
+                                     Adjusted_Weight != Inf ~ Adjusted_Weight))
+
+
+### Graph a players output relative to their comparables at the same time.
+### Automatically add the % ofa  players comps who became NHL players and stars to the graph
+### Color the graph by their NHL otucoem
+Comps_Graph <- ggplot(Top_Comps, aes(x=Season_Age.y, y=NHLe_GP.x,color=Outcome)) +
+  geom_point(cex=5, alpha = 0.8) +
+  geom_hline(yintercept = mean(Top_Comps$NHLe_GP.x), color = "black", linetype = "dashed") +
+  geom_vline(xintercept =  mean(Top_Comps$Season_Age.y), color = "black", linetype = "dashed") +
+  geom_text_repel(aes(label=data.player.name.x),
+                  force=1, point.padding=0.04,
+                  segment.size=0.1) +
+  scale_color_manual(values = c("Prospect" = "Black" ,"Bust" = "#FF0000", "Replacement Level Production" = "#FC4E07","Bottom 6 Production" = "coral", "Top 6 Production" = "cyan4", "Star Production" = "Blue", "Waiting For Full Data" = "gray45")) +
+  scale_x_reverse() +
+  labs(x = "Year Age",
+       y="NHLe Per Game Played",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = Title_String,
+       subtitle = Combined_String3) +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+Comps_Graph
+
+
+
+
+### Now Apply a loop to find the closest comparalbes of every singel prospect in the database
+### Get Each Player and Select
+
+
+Get_names_Fs2 <- For_F_Coms_No_NA
+
+
+
+Get_names_Fs2$down_count <- nrow(Get_names_Fs2):1
+
+
+
+Get_names_Fs2 <- Get_names_Fs2 %>%
+  arrange((down_count))
+
+Max_I <- max(Get_names_Fs2$down_count)
+Max_I <- as.numeric(Max_I)
+
+
+
+
+i <- 1
+
+
+
+
+
+Player_ID <- Get_names_Fs2 %>%
+  filter(down_count == i)
+
+Player_Name_Var <- Player_ID[1,1]
+
+
+Player_ID <- Player_ID[1,2]
+
+Player_ID <- as.numeric(Player_ID)
+
+
+
+
+
+Player_Name_Var <- as.character(Player_Name_Var)
+
+
+
+### Start the Era Adjustment
+
+Find_Player <- For_F_Coms_No_NA %>%
+  filter(data.player.id == Player_ID)
+
+
+
+
+Player_Scoring_DY <- Find_Player %>%
+  select(DY_NHLe_G)
+
+Player_Scoring_DY <- Player_Scoring_DY[1,1]
+
+Player_Scoring_DY_Min <- Find_Player %>%
+  select(DY_Min_NHLe_G)
+
+Player_Scoring_DY_Min <- Player_Scoring_DY_Min[1,1]
+
+
+Player_Assists_DY <- Find_Player %>%
+  select(DY_NHLe_A)
+
+Player_Assists_DY <- Player_Assists_DY[1,1]
+
+
+Player_Assists_DY_Min <- Find_Player %>%
+  select(DY_Min_NHLe_A)
+
+Player_Assists_DY_Min <- Player_Assists_DY_Min[1,1]
+
+
+
+
+Player_Age <- Find_Player %>%
+  select(Season_Age)
+
+Player_Age <- Player_Age[1,1]
+
+
+Player_Scoring_League <- Find_Player %>%
+  select(Current_League_Z)
+
+Player_Scoring_League <- Player_Scoring_League[1,1]
+
+Player_DY_GP <- Find_Player %>%
+  select(Total_GP.x)
+
+Player_DY_GP <- Player_DY_GP[1,1]
+
+
+
+
+Player_DY_Min_GP <- Find_Player %>%
+  select(Total_GP.y)
+
+Player_DY_Min_GP <- Player_DY_Min_GP[1,1]
+
+
+
+Player_DY_Pims <- Find_Player %>%
+  select(DY_PIMs_G)
+
+Player_DY_Pims <- Player_DY_Pims[1,1]
+
+
+
+Player_Comps <- For_F_Coms_No_NA %>%
+  mutate(Comarable_score =  abs(Player_Scoring_DY - DY_NHLe_G) + abs(Player_Scoring_DY_Min-DY_Min_NHLe_G)  +
+           abs(Player_Assists_DY - DY_NHLe_A) + abs(Player_Assists_DY_Min - DY_Min_NHLe_A)  +
+           abs(Player_Age - Season_Age)  + abs(Player_Scoring_League - Current_League_Z) +
+           abs(Player_DY_GP - Total_GP.x) + abs(Player_DY_Min_GP - Total_GP.y) +
+           abs(Player_DY_Pims - DY_PIMs_G)      ) %>%
+  ### Comp Score is being divided by 9 because in the O.G. code there was 9 metrics. 
+  ### So Update Accordingly
+  mutate(Comarable_score = Comarable_score / 9) %>%
+  arrange((Comarable_score)) %>%
+  mutate(Adjusted_Weight = 10/ Comarable_score)
+
+
+
+### Take Only the Top 15
+Top_Comps <- Player_Comps[1:36,]
+
+
+glimpse(Top_Comps)
+###
+Out_Sample_Comps <- Top_Comps %>%
+  filter(data.player.name.x != Player_Name_Var) %>%
+  filter(Draft_Year < 2018) %>%
+  mutate(Star_Player = Total_Zero_Seven * Played_82)
+
+
+### Unweighted Comps
+NHL_Rate <- mean(Out_Sample_Comps$Played_82)
+NHL_Rate <- NHL_Rate * 100
+
+NHL_Rate <- round(NHL_Rate, digits = 2)
+
+
+### Weighted Comps
+W_NHL_Rate <- weighted.mean(Out_Sample_Comps$Played_82, Out_Sample_Comps$Adjusted_Weight)
+W_NHL_Rate <- W_NHL_Rate * 100
+W_NHL_Rate <- round(W_NHL_Rate, digits = 2)
+
+
+
+### Unweighted Star Rate
+Star_Rate <- mean(Out_Sample_Comps$Star_Player)
+Star_Rate <- Star_Rate * 100
+Star_Rate <- round(Star_Rate, digits = 2)
+
+
+### Weighted Star Rate
+W_Star_Rate <- weighted.mean(Out_Sample_Comps$Star_Player, Out_Sample_Comps$Adjusted_Weight)
+W_Star_Rate <- W_Star_Rate * 100
+W_Star_Rate <- round(W_Star_Rate, digits = 2)
+
+
+
+
+
+Just_NHL_Comps <- Out_Sample_Comps %>%
+  filter(Career_PPG_EADJ != "NA")
+
+
+
+Points_GP <- mean(Just_NHL_Comps$Career_PPG_EADJ)
+W_Points_GP <- weighted.mean(Just_NHL_Comps$Career_PPG_EADJ, Just_NHL_Comps$Adjusted_Weight)
+
+
+
+Find_Player2 <- Find_Player %>%
+  mutate(Hit_Rate = NHL_Rate) %>%
+  mutate(Star_Prob = Star_Rate) %>%
+  mutate(PPG = Points_GP) %>%
+  mutate(W_Hit_Rate = W_NHL_Rate) %>%
+  mutate(W_Star_Prob = W_Star_Rate) %>%
+  mutate(W_PPG = W_Points_GP)
+
+
+### Now Make the loop
+
+i <- 2
+
+
+
+for (i in 2:Max_I) {
+  
+  Player_ID <- Get_names_Fs2 %>%
+    filter(down_count == i)
+  Player_Name_Var <- Player_ID[1,1]
+  
+  
+  
+  Player_ID <- Player_ID[1,2]
+  
+  Player_ID <- as.numeric(Player_ID)
+  
+  Player_Name_Var <- as.character(Player_Name_Var)
+  
+  
+  
+  
+  ### Start the Era Adjustment
+  
+  Find_Player <- For_F_Coms_No_NA %>%
+    filter(data.player.id == Player_ID)
+  
+  
+  
+  
+  Player_Scoring_DY <- Find_Player %>%
+    select(DY_NHLe_G)
+  
+  Player_Scoring_DY <- Player_Scoring_DY[1,1]
+  
+  Player_Scoring_DY_Min <- Find_Player %>%
+    select(DY_Min_NHLe_G)
+  
+  Player_Scoring_DY_Min <- Player_Scoring_DY_Min[1,1]
+  
+  
+  Player_Assists_DY <- Find_Player %>%
+    select(DY_NHLe_A)
+  
+  Player_Assists_DY <- Player_Assists_DY[1,1]
+  
+  
+  Player_Assists_DY_Min <- Find_Player %>%
+    select(DY_Min_NHLe_A)
+  
+  Player_Assists_DY_Min <- Player_Assists_DY_Min[1,1]
+  
+  
+  
+  
+  Player_Age <- Find_Player %>%
+    select(Season_Age)
+  
+  Player_Age <- Player_Age[1,1]
+  
+  
+  Player_Scoring_League <- Find_Player %>%
+    select(Current_League_Z)
+  
+  Player_Scoring_League <- Player_Scoring_League[1,1]
+  
+  Player_DY_GP <- Find_Player %>%
+    select(Total_GP.x)
+  
+  Player_DY_GP <- Player_DY_GP[1,1]
+  
+  
+  
+  
+  Player_DY_Min_GP <- Find_Player %>%
+    select(Total_GP.y)
+  
+  Player_DY_Min_GP <- Player_DY_Min_GP[1,1]
+  
+  
+  
+  Player_DY_Pims <- Find_Player %>%
+    select(DY_PIMs_G)
+  
+  Player_DY_Pims <- Player_DY_Pims[1,1]
+  
+  
+  
+  Player_Comps <- For_F_Coms_No_NA %>%
+    mutate(Comarable_score =  abs(Player_Scoring_DY - DY_NHLe_G) + abs(Player_Scoring_DY_Min-DY_Min_NHLe_G)  +
+             abs(Player_Assists_DY - DY_NHLe_A) + abs(Player_Assists_DY_Min - DY_Min_NHLe_A)  +
+             abs(Player_Age - Season_Age)  + abs(Player_Scoring_League - Current_League_Z) +
+             abs(Player_DY_GP - Total_GP.x) + abs(Player_DY_Min_GP - Total_GP.y) +
+             abs(Player_DY_Pims - DY_PIMs_G)      ) %>%
+    ### Comp Score is being divided by 9 because in the O.G. code there was 9 metrics. 
+    ### So Update Accordingly
+    mutate(Comarable_score = Comarable_score / 9) %>%
+    arrange((Comarable_score)) %>%
+    mutate(Adjusted_Weight = 10/ Comarable_score)
+  
+  
+  
+  ### Take Only the Top 15
+  Top_Comps <- Player_Comps[1:36,]
+  
+  
+  ###
+  Out_Sample_Comps <- Top_Comps %>%
+    filter(data.player.name.x != Player_Name_Var) %>%
+    filter(Draft_Year < 2018) %>%
+    mutate(Star_Player = Total_Zero_Seven * Played_82)
+  
+  
+  
+  NHL_Rate <- mean(Out_Sample_Comps$Played_82)
+  NHL_Rate <- NHL_Rate * 100
+  
+  NHL_Rate <- round(NHL_Rate, digits = 2)
+  
+  
+  
+  ### Weighted Comps
+  W_NHL_Rate <- weighted.mean(Out_Sample_Comps$Played_82, Out_Sample_Comps$Adjusted_Weight)
+  W_NHL_Rate <- W_NHL_Rate * 100
+  W_NHL_Rate <- round(W_NHL_Rate, digits = 2)
+  
+  
+  
+  
+  ### Unweighted Comps
+  Star_Rate <- mean(Out_Sample_Comps$Star_Player)
+  Star_Rate <- Star_Rate * 100
+  Star_Rate <- round(Star_Rate, digits = 2)
+  
+  
+  ### Weighted Comps
+  W_Star_Rate <- weighted.mean(Out_Sample_Comps$Star_Player, Out_Sample_Comps$Adjusted_Weight)
+  W_Star_Rate <- W_Star_Rate * 100
+  W_Star_Rate <- round(W_Star_Rate, digits = 2)
+  
+  
+  
+  
+  
+  Just_NHL_Comps <- Out_Sample_Comps %>%
+    filter(Career_PPG_EADJ != "NA")
+  
+  
+  
+  Points_GP <- mean(Just_NHL_Comps$Career_PPG_EADJ)
+  W_Points_GP <- weighted.mean(Just_NHL_Comps$Career_PPG_EADJ, Just_NHL_Comps$Adjusted_Weight)
+  
+  
+  
+  
+  
+  Find_Player <- Find_Player %>%
+    mutate(Hit_Rate = NHL_Rate) %>%
+    mutate(Star_Prob = Star_Rate) %>%
+    mutate(PPG = Points_GP) %>%
+    mutate(W_Hit_Rate = W_NHL_Rate) %>%
+    mutate(W_Star_Prob = W_Star_Rate) %>%
+    mutate(W_PPG = W_Points_GP)
+  
+  
+  
+  Find_Player2 <- rbind(Find_Player2,Find_Player)
+  
+  
+  print(i)
+  
+  i <- i + 1 
+}
+
+### Show the expected value of a prospect by multiplying their comps NHL player rate by the PPG of
+### said comps at the NHL level
+Find_Player2 <- Find_Player2 %>%
+  mutate(EV = (Hit_Rate / 100)*PPG  ) %>%
+  mutate(W_EV = (Hit_Rate / 100)*W_PPG  )
+
+
+glimpse(Find_Player2)
+
+
+No_Pure_Miss <- Find_Player2 %>%
+  filter(Hit_Rate != 0)
+
+
+ggplot(No_Pure_Miss, aes(x=W_Hit_Rate, y= Star_Prob)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x = "NHL Player Rate",
+       y="Star Rate",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "Do High Risk / High Reward Prospects Exist?",
+       subtitle = "DY Forwards Only. NHL Player Rate and Star Player Rate of 25 Closest Comparables") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+### See if player comp statitsics actually are related to anything at the NHL level
+GAM_Model <- gam(Star_Prob ~ s(Hit_Rate) + Hit_Rate, data = No_Pure_Miss)
+
+summary(GAM_Model)
+
+
+
+GAM_Model <- gam(Star_Prob ~ s(W_Hit_Rate) + W_Hit_Rate, data = No_Pure_Miss)
+
+summary(GAM_Model)
+
+### This is my attempt at estimating prospect varience
+No_Pure_Miss$Predicted_Star_Rate <- predict(GAM_Model, No_Pure_Miss, type = "response")  
+
+### To est varience I predict what % of a players comps became stars based on how many made the nhl
+### then i take the residual
+### If a player had a larger % of their comps become stars than expected based on the % that made the 
+### nhl i am thinking of them as a "high upside" prospect, where as if a tone of players
+### comps made the Nhl but like non became stars that may represent high floor limited ceilling
+
+### Just an idea rn though
+No_Pure_Miss <- No_Pure_Miss %>%
+  mutate(Star_Rate_Above_Expected = Star_Prob - Predicted_Star_Rate) %>%
+  arrange(desc(Star_Rate_Above_Expected))
+
+
+Just_2023 <- No_Pure_Miss %>%
+  filter(Draft_Year == 2016) %>%
+  arrange(desc(Star_Rate_Above_Expected))
+
+
+class_ev <- No_Pure_Miss %>%
+  filter(Draft_Year == 2023) %>%
+  arrange(desc(W_EV))
+
+
+
+Split_By_Var1 <- No_Pure_Miss %>%
+  filter(Draft_Year < 2018) %>%
+  filter(Hit_Rate > 80 & Hit_Rate < 90)
+
+
+
+High_Var <- Split_By_Var1 %>%
+  filter(Star_Rate_Above_Expected > 0)
+
+
+Hit_High <- mean(High_Var$Played_200)
+Star_High <- mean(High_Var$Total_Zero_Seven)
+
+
+
+Low_Var <- Split_By_Var1 %>%
+  filter(Star_Rate_Above_Expected < 0)
+
+
+
+Hit_Low <- mean(Low_Var$Played_200)
+Star_Low <- mean(Low_Var$Total_Zero_Seven)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ggplot(No_Pure_Miss, aes(x=Hit_Rate, y= Predicted_Star_Rate)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x = "NHL Player Rate",
+       y="Star Rate",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "Do High Risk / High Reward Prospects Exist?",
+       subtitle = "DY Forwards Only. NHL Player Rate and Star Player Rate of 25 Closest Comparables") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+fider_of <- No_Pure_Miss %>%
+  filter(Hit_Rate < 60 & Star_Prob > 20)
+
+
+glimpse(No_Pure_Miss)
+
+
+out_small_Sample <- No_Pure_Miss %>%
+  filter(Played_82 == 1)
+
+ggplot(out_small_Sample, aes(x=W_EV, y= Career_PPG_EADJ)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Comps PPG",
+       y="Player PPG",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66.",
+       title = "What Do Comps Tell Us About Prospects",
+       subtitle = "DY Forwards Only. 35 Closest Comparables") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+
+
+
+model1 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ PPG)
+summary(model1)
+
+
+model1 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ W_PPG)
+summary(model1)
+
+
+model2 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ EV)
+summary(model2)
+
+
+model2 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ W_EV)
+summary(model2)
+
+model2 <- lm(data = out_small_Sample, Career_PPG_EADJ ~ W_EV)
+summary(model2)
+
+glimpse(No_Pure_Miss)
+
+model2 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ W_EV)
+summary(model2)
+
+model2 <- lm(data = No_Pure_Miss, Career_PPG_EADJ ~ W_PPG + W_Hit_Rate)
+summary(model2)
+
+glimpse(No_Pure_Miss)
+
+
+
+model2 <- lm(data = out_small_Sample, Career_PPG_EADJ ~ W_EV + Star_Rate_Above_Expected)
+summary(model2)
+
+
+
+new_model <- glm(Played_82 ~ W_EV + Star_Rate_Above_Expected, 
+                 data = No_Pure_Miss, family = binomial)
+summary(new_model)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Make the model for defenders as well. Note that this is less fleshed out
+star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +Prev_NHLe_GP
+                  , 
+                  data = D_Model, family = binomial)
+
+
+
+
+
+summary(star_model)
+
+
+backup_star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age, 
+                         data = D_Model, family = binomial)
+summary(backup_star_model)
+
+
+
+NHLer_Model <- glm(Made_NHL ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                     DY_Min_NHLe_A, 
+                   data = D_Model, family = binomial)
+summary(NHLer_Model)
+
+
+GAM_Model <- gam(Star_NHLer ~ s(Current_NHLe_GP) + s(Season_Age) 
+                 + s(Prev_NHLe_GP), data = D_Model, family = binomial())
+
+summary(GAM_Model)
+
+
+RF_Model <- randomForest(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                           Prev_NHLe_GP, data = Neural_Net_Data, ntree = 500)
+
+
+summary(RF_Model)
+
+
+
+
+
+
+
+
+Just_Defenders$Star_Player_Odds <- predict(star_model, Just_Defenders, type = "response")  
+Just_Defenders$NHL_Player_Odds <- predict(NHLer_Model, Just_Defenders, type = "response") 
+Just_Defenders$GAM_Star_Player_Odds <- predict(GAM_Model, Just_Defenders, type = "response") 
+
+
+
+Best_Backs_Ever <- Just_Defenders %>%
+  arrange(desc(Star_Player_Odds))
+
+
+
+
+
+
+Find_2023_Class <- Just_Defenders %>%
+  filter(Draft_Year == 2022) %>%
+  arrange(desc(Star_Player_Odds))
+
+
+find_player <- D_Model %>%
+  filter(data.player.name.x == "Luke Hughes")
+
+
+
+
+for_graph <- Find_2023_Class %>% 
+  filter(Star_Player_Odds > 0.05) 
+
+
+glimpse(for_graph)
+
+
+
+base_words_graph33 <- ggplot(for_graph) +
+  geom_bar( aes(y= reorder(data.player.name.x, Star_Player_Odds)  , x=Star_Player_Odds, fill = NHL_Player_Odds), stat="identity", alpha=0.7) +
+  facet_wrap(~Draft_Year) +
+  #### geom_errorbar( aes(x=Season, ymin=estimate-Two_STD, ymax=estimate+Two_STD), width=0.4, 
+  ### colour="orange", alpha=0.9, size=1.3) +
+  labs(x = "Star Player Probability",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66. Duplicate Names Will Cause Bugs",
+       title = "Most Likely Star Forwards From The Draft Class",
+       subtitle = "DY Forwards Only. Draft Class On Label") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+base_words_graph33
+
+
+
+
+
+
+
+
+
+### Out of Sample Tests
+
+
+### Test the Models Out of sample
+### This first one was done quickly just to ensure I had functioning code
+set.seed(1)
+split = sample.split(Forwards_Model$Star_NHLer, SplitRatio = 0.7)
+train_f = subset(Forwards_Model, split == TRUE)
+test_f = subset(Forwards_Model, split == FALSE)
+
+
+test_f_nn <- train_f %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(Games_Played_R.x > 4)
+
+
+
+
+
+
+star_model <- glm(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                    Prev_NHLe_GP, 
+                  data = test_f_nn, family = binomial)
+summary(star_model)
+
+
+
+
+
+
+backup_star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age, 
+                         data = test_f_nn, family = binomial)
+summary(backup_star_model)
+
+
+GAM_Model <- gam(Star_NHLer ~ s(Current_NHLe_GP) + s(Season_Age) 
+                 + s(Prev_NHLe_GP), data = test_f_nn, family = binomial())
+
+summary(GAM_Model)
+
+
+
+stars_g_a_sep <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                    Prev_NHLe_GP, 
+                  data = test_f_nn, family = binomial)
+summary(stars_g_a_sep)
+
+
+test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+test_f$Backup_Star_Player_Odds <- predict(backup_star_model, test_f, type = "response")  
+test_f$GAM_Star_Player_Odds <- predict(GAM_Model, test_f, type = "response")  
+test_f$stars_g_a_sep <- predict(stars_g_a_sep, test_f, type = "response")  
+test_f$test_net_f <- predict(test_net_f, test_f, type = "response")  
+
+
+
+
+test_f1 <- test_f %>%
+  mutate(Logit1_Error = Star_Player_Odds - Star_NHLer) %>%
+  filter(Star_Player_Odds != "NA") %>%
+  mutate(Abs_Logit1 = abs(Logit1_Error)) %>%
+  mutate(GAM_Error = GAM_Star_Player_Odds - Star_NHLer) %>%
+  mutate(Abs_GAM = abs(GAM_Error)) %>%
+  mutate(Only_DY_Error = Backup_Star_Player_Odds - Star_NHLer) %>%
+  mutate(Abs_Only_DY = abs(Only_DY_Error)) %>%
+  mutate(G_A_Split_Error = stars_g_a_sep - Star_NHLer) %>%
+  mutate(ABS_G_A_Split_Error = abs(G_A_Split_Error)) %>%
+  mutate(Logit_GAM_Comb = (Star_Player_Odds+GAM_Star_Player_Odds)/2 ) %>%
+  mutate(Comb_Error = Logit_GAM_Comb - Star_NHLer) %>%
+  mutate(ABS_Comb_Error = abs(Comb_Error) )
+
+
+
+mean(test_f1$Abs_Logit1) 
+mean(test_f1$Abs_GAM) 
+mean(test_f1$Abs_Only_DY) 
+mean(test_f1$ABS_G_A_Split_Error) 
+mean(test_f1$ABS_Comb_Error) 
+
+
+
+
+
+### Remember to standardizd ghese
+test_net_f <- neuralnet(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age + DY_Min_NHLe_G +
+                          DY_Min_NHLe_A + Games_Played_R.x + Games_Played_R.y
+                        , data = test_f_nn, hidden = c(2),err.fct = "sse",
+                        linear.output = FALSE,act.fct = "logistic",stepmax = 2e06,
+                        threshold = 0.01,lifesign = "full")
+
+test_net_f$result.matrix
+plot(test_net_f)
+
+glimpse(test_f_nn)
+
+
+### Test the COmparables Data in the Logit Model
+glimpse(Find_Player2)
+
+for_join <- Find_Player2 %>%
+  select(data.player.id,Hit_Rate,Star_Prob,W_Hit_Rate,W_Star_Prob,PPG,W_PPG)
+
+for_join <- as.matrix(for_join)
+
+
+
+
+
+
+### Now the real out of sample modelling begins
+#### Make a loop to test out of sample modelling
+
+### Name the model
+Model_Type <- "Logit all NHLe Equal"
+
+### Filter NAs so the ML models can run
+no_na_data <- Forwards_Model %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(Current_League_Z != "NA") %>%
+  filter(Current_Team_Z != "NA") %>%
+  filter(Current_League_Diff != "NA") %>%
+  filter(Current_Team_Z != "NaN") %>%
+  filter(Games_Played_R.x > 4)
+  
+###
+With_Comps <- left_join(no_na_data,for_join, by = "data.player.id")
+  
+
+
+### Train the momdel once. This next part is unifinished
+star_model <- glm(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                    Prev_NHLe_GP,  
+                  data = With_Comps, family = binomial)
+summary(star_model)
+
+
+
+star_model <- glm(Star_NHLer ~ W_Hit_Rate,  
+                  data = With_Comps, family = binomial)
+summary(star_model)
+
+glimpse(no_na_data)
+### Try selecting only the variables needed for prediction
+For_Predictions <- no_na_data %>%
+  select(Star_NHLer,DY_NHLe_G,DY_NHLe_A,DY_Min_NHLe_G,DY_Min_NHLe_A,Weighted_Z_Score.x,Season_Age,
+         Weighted_League_Difficulty.x,Weighted_Z_Score_Team.x,Weighted_Z_Score.y,Weighted_Z_Score_Team.y,
+         Weighted_League_Difficulty.y)
+
+
+
+
+X_train = For_Predictions[,-1]                 
+y_train = For_Predictions[,1]        
+
+class(X_train)
+class(y_train)
+
+
+X_train <- as.matrix(X_train)
+y_train <- as.matrix(y_train)
+
+
+
+# convert the train and test data into xgboost matrix type.
+xgboost_train = xgb.DMatrix(data=X_train, label=y_train)
+
+
+
+xboost_model <- xgboost(data = xgboost_train,                    # the data   
+                 max.depth=3,                            # max depth 
+                 nrounds=50)                              # max number of boosting iterations
+
+summary(xboost_model)
+
+
+
+pred_test = predict(xboost_model, xgboost_train)
+
+pred_test <- as.data.frame(pred_test)
+
+
+
+xgpred <- cbind(no_na_data,pred_test)
+
+
+xgpred2 <- xgpred %>%
+  arrange(desc(pred_test))
+
+
+find_Stars <- xgpred2 %>%
+  filter(Star_NHLer == 1)
+
+
+find_brick <- xgpred2 %>%
+  filter(Star_NHLer == 0)
+
+
+
+### Back to real modelling again. Set the seed and split between training and test set
+### this function puts 85% of the stars into the training set. Will mess around with that number
+### later
+set.seed(1)
+split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+train_f = subset(no_na_data, split == TRUE)
+test_f = subset(no_na_data, split == FALSE)
+
+
+### train the model first time
+star_model <- glm(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                    Prev_NHLe_GP, 
+                  data = train_f, family = binomial)
+summary(star_model)
+
+
+### get predictions
+test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+
+
+finder <- as.data.frame(test_f$Star_NHLer)
+
+glimpse(test_f)
+
+### get the model error stats
+find_mae <- test_f %>%
+  mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+  mutate(Square_Error = (Star_NHLer - Star_Player_Odds)^2  ) %>%
+  mutate(ABS_Resid = abs(Residual))
+
+MAE <- mean(find_mae$ABS_Resid)
+RMSE <- sqrt(mean(find_mae$Square_Error))
+
+
+### add the this seed's MAE and RMSE
+Residauls_Frame <- as.data.frame(MAE)
+RMSE_Frame <- as.data.frame(RMSE)
+
+
+Residauls_Frame <- Residauls_Frame %>%
+  mutate(Type_Of_Model = Model_Type)
+
+
+RMSE_Frame <- RMSE_Frame %>%
+  mutate(Type_Of_Model = Model_Type)
+
+
+### Now Make it a loop where it does all this 1000 times to see how accurate each model is over repeated 
+### mock out of sample runs
+
+i <- 2
+
+for (i in 2:1000) {
+Model_Type <- "Logit all NHLe Equal"
+
+
+no_na_data <- Forwards_Model %>%
+  filter(DY_NHLe_G != "NA") %>%
+  filter(DY_NHLe_A != "NA") %>%
+  filter(Season_Age != "NA") %>%
+  filter(DY_Min_NHLe_G != "NA") %>%
+  filter(DY_Min_NHLe_A != "NA") %>%
+  filter(Current_League_Z != "NA") %>%
+  filter(Current_Team_Z != "NA") %>%
+  filter(Current_League_Diff != "NA") %>%
+  filter(Current_Team_Z != "NaN") %>%
+  filter(Total_GP.x > 4)
+
+
+set.seed(i)
+split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+train_f = subset(no_na_data, split == TRUE)
+test_f = subset(no_na_data, split == FALSE)
+
+
+
+star_model <- glm(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                    Prev_NHLe_GP, 
+                  data = train_f, family = binomial)
+summary(star_model)
+
+
+
+test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+
+
+
+
+
+find_mae <- test_f %>%
+  mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+  mutate(Square_Error = (Star_NHLer - Star_Player_Odds)^2  ) %>%
+  mutate(ABS_Resid = abs(Residual))
+
+MAE <- mean(find_mae$ABS_Resid)
+RMSE <- sqrt(mean(find_mae$Square_Error))
+
+
+Next_Resid_Frame <- as.data.frame(MAE)
+Next_RMSE_Frame <- as.data.frame(RMSE)
+
+
+Next_Resid_Frame <- Next_Resid_Frame %>%
+  mutate(Type_Of_Model = Model_Type)
+
+Next_RMSE_Frame <- Next_RMSE_Frame %>%
+  mutate(Type_Of_Model = Model_Type)
+
+
+
+
+Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+RMSE_Frame <- rbind(RMSE_Frame,Next_RMSE_Frame)
+
+i <- i + 1 
+
+}
+
+
+
+### Now do the same thing with the other model type to get the MAE and RMSE
+### This code allows me to test how changing various modelling decisions affect the models 
+### out of sample accuracy, and allows me to find which models in general predict the best
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "Logit Goals Assists Seperate"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                      Prev_NHLe_GP, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "Logit DY Only"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A + Season_Age, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "GAM"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- gam(Star_NHLer ~ s(Current_NHLe_GP) + s(Season_Age) 
+                   + s(Prev_NHLe_GP), data = train_f, family = binomial())
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF All NHLe Equal"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                               Prev_NHLe_GP, data = train_f, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF G And A Split"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP, data = train_f, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF Full Set of Vars"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP + Current_League_Z + Current_League_Diff +
+                               Current_Team_Z + Total_GP.x, data = train_f, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF Full Set of Vars"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Total_GP.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP + Current_League_Z +
+                                Total_GP.x + Total_GP.y, data = train_f, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF G And A Split 250 Trees"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.85)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP, data = train_f, ntree = 250)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF G And A Split 750 Trees"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP, data = train_f, ntree = 750)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF 750 Trees"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP, data = train_f, ntree = 750)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+glimpse(train_f)
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF 750 Trees, GP Too"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Star_NHLer ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP + Total_GP.x + Total_GP.y, data = train_f, ntree = 750)
+  
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+### Do this with a Summarise command an no plry instead
+
+
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "Logit all NHLe Equal With GP"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Current_League_Z != "NA") %>%
+    filter(Current_Team_Z != "NA") %>%
+    filter(Current_League_Diff != "NA") %>%
+    filter(Current_Team_Z != "NaN") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Star_NHLer, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Star_NHLer ~ Current_NHLe_GP + Season_Age +
+                      Prev_NHLe_GP + Total_GP.x + Total_GP.y + Current_League_Z, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  test_f$Star_Player_Odds <- predict(star_model, test_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- test_f %>%
+    mutate(Residual = Star_NHLer - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+
+
+### Do this with a Summarise command an no plry instead
+
+find_nhls <- no_na_data %>%
+  filter(Peak_PPG != "NA")
+
+glimpse(Residauls_Frame)
+
+
+frame_residuals <- Residauls_Frame %>%
+  filter(Type_Of_Model != "RF G And A Split 750 Trees") %>%
+  filter(Type_Of_Model != "RF G And A Split 250 Trees")
+  
+  
+  
+
+
+mu2 <- frame_residuals %>%
+  group_by(Type_Of_Model) %>%
+  summarise(Group_Mean = mean(MAE))
+
+
+### Makes a graph to show the distribution of the accuracy of the various modelling types
+p<-ggplot(frame_residuals, aes(x=MAE, color=Type_Of_Model, fill = Type_Of_Model)) +
+  geom_density(alpha = 0.4) +
+  labs(x = "Out of Sample Mean Absolute Error",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Out of Sample Model Accuracy",
+       subtitle = "Based on 1000 Simulations. DY Forwards Only") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5)) +
+  geom_vline(data=mu2, aes(xintercept=Group_Mean, color=Type_Of_Model),
+             linetype="dashed") +
+  annotate(geom="text", x=0.0025, y=1250, label="More Accurate",
+             color="black") +
+  annotate(geom="text", x=0.006, y=1250, label="Less Accurate",
+           color="black")
+
+  
+p
+
+
+
+
+
+
+
+
+
+
+### Will eventaully need to repeat this process for the odds of becoming an NHL player model. 
+set.seed(1)
+split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.85)
+train_f = subset(no_na_data, split == TRUE)
+test_f = subset(no_na_data, split == FALSE)
+
+
+
+star_model <- glm(Made_NHL ~ Current_NHLe_GP + Season_Age +
+                    Prev_NHLe_GP, 
+                  data = train_f, family = binomial)
+summary(star_model)
+
+
+
+train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+
+
+finder <- as.data.frame(train_f$Made_NHL)
+
+
+
+find_mae <- train_f %>%
+  mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+  mutate(ABS_Resid = abs(Residual))
+
+MAE <- mean(find_mae$ABS_Resid)
+
+
+Residauls_Frame <- as.data.frame(MAE)
+
+Residauls_Frame <- Residauls_Frame %>%
+  mutate(Type_Of_Model = Model_Type)
+
+### Now Make it a loop
+
+i <- 2
+
+for (i in 2:1000) {
+  Model_Type <- "Logit all NHLe Equal"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Made_NHL ~ Current_NHLe_GP + Season_Age +
+                      Prev_NHLe_GP, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "Logit Goals Assists Seperate"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Made_NHL ~ DY_NHLe_G + DY_NHLe_A + Season_Age +
+                      Prev_NHLe_GP, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "Logit DY Only"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- glm(Made_NHL ~ DY_NHLe_G + DY_NHLe_A + Season_Age, 
+                    data = train_f, family = binomial)
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "GAM"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- gam(Made_NHL ~ s(Current_NHLe_GP) + s(Season_Age) 
+                    + s(Prev_NHLe_GP), data = train_f, family = binomial())
+  
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF All NHLe Equal"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Made_NHL ~ Current_NHLe_GP + Season_Age +
+                               Prev_NHLe_GP, data = Neural_Net_Data, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+### Now do the same thing with the other model type to get the MAE
+i <- 1
+
+for (i in 1:1000) {
+  Model_Type <- "RF G And A Split"
+  
+  
+  no_na_data <- Forwards_Model %>%
+    filter(DY_NHLe_G != "NA") %>%
+    filter(DY_NHLe_A != "NA") %>%
+    filter(Season_Age != "NA") %>%
+    filter(DY_Min_NHLe_G != "NA") %>%
+    filter(DY_Min_NHLe_A != "NA") %>%
+    filter(Games_Played_R.x > 4)
+  
+  
+  set.seed(i)
+  split = sample.split(no_na_data$Made_NHL, SplitRatio = 0.7)
+  train_f = subset(no_na_data, split == TRUE)
+  test_f = subset(no_na_data, split == FALSE)
+  
+  
+  
+  star_model <- randomForest(Made_NHL ~ DY_NHLe_G + DY_NHLe_A +Season_Age +
+                               Prev_NHLe_GP, data = Neural_Net_Data, ntree = 500)
+  
+  summary(star_model)
+  
+  
+  
+  train_f$Star_Player_Odds <- predict(star_model, train_f, type = "response")  
+  
+  
+  
+  
+  
+  find_mae <- train_f %>%
+    mutate(Residual = Made_NHL - Star_Player_Odds) %>%
+    mutate(ABS_Resid = abs(Residual))
+  
+  MAE <- mean(find_mae$ABS_Resid)
+  
+  
+  Next_Resid_Frame <- as.data.frame(MAE)
+  
+  Next_Resid_Frame <- Next_Resid_Frame %>%
+    mutate(Type_Of_Model = Model_Type)
+  
+  
+  
+  Residauls_Frame <- rbind(Residauls_Frame,Next_Resid_Frame)
+  
+  i <- i + 1 
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+### Do this with a Summarise command an no plry instead
+
+
+
+
+
+
+
+### Do this with a Summarise command an no plry instead
+
+
+
+
+
+
+
+
+mu2 <- Residauls_Frame %>%
+  group_by(Type_Of_Model) %>%
+  summarise(Group_Mean = mean(MAE))
+
+
+p<-ggplot(Residauls_Frame, aes(x=MAE, color=Type_Of_Model, fill = Type_Of_Model)) +
+  geom_density(alpha = 0.4) +
+  labs(x = "Out of Sample Mean Absolute Error",
+       y="",
+       caption = "Data from Elite Prospects, Graph By @CMHockey66",
+       title = "Out of Sample Model Accuracy",
+       subtitle = "DY Forwards Only") +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        plot.caption = element_text(size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust=0.5),
+        plot.caption = element_text(hjust = 0.5)) +
+  geom_vline(data=mu2, aes(xintercept=Group_Mean, color=Type_Of_Model),
+             linetype="dashed") 
+
+
+p
+
+### This isn't done but this is what im working with right now
